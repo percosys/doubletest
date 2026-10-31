@@ -153,13 +153,27 @@ fn thin_internal_cavity_is_not_merged_away() {
 }
 
 #[test]
-fn sphere_falls_back_to_mesh_conversion() {
-    let p = tmp("sphere.stl");
-    write_stl(&uv_sphere(20.0, 40, 80), &p);
+fn ellipsoid_falls_back_to_mesh_conversion() {
+    // not a surface of revolution (elliptical sections) and not 2.5D: nothing exact to build
+    let mut m = uv_sphere(20.0, 40, 80);
+    for v in m.v.iter_mut() { *v = [v[0] * 1.0, v[1] * 0.7, v[2] * 0.5]; }
+    let p = tmp("ellipsoid.stl");
+    write_stl(&m, &p);
     let plan = analyze(&p, 0.05).unwrap();
-    assert_eq!(plan.strategy, "mesh_convert");
-    assert!(plan.layers.is_empty());
-    assert!(plan.notes.iter().any(|n| n.contains("falling back") || n.contains("no 2.5D")));
+    assert_eq!(plan.strategy, "mesh_convert", "{:?}", plan.notes);
+    assert!(plan.layers.is_empty() && plan.revolve.is_none());
+}
+
+#[test]
+fn sphere_is_a_revolve_with_a_half_disc_profile() {
+    let p = tmp("sphere.stl");
+    write_stl(&uv_sphere(20.0, 90, 180), &p);
+    let plan = analyze(&p, 0.05).unwrap();
+    assert_eq!(plan.strategy, "revolve", "{:?}", plan.notes);
+    match region_loops(&plan).1 {
+        Loop::Path { pieces } => assert!(pieces.iter().any(|x| matches!(x, stl2cad::plan::PathPiece::Arc { r, .. } if (r - 20.0).abs() < 0.05)), "{pieces:?}"),
+        o => panic!("expected an arc profile, got {o:?}"),
+    }
 }
 
 #[test]
@@ -273,7 +287,7 @@ fn counts(pieces: &[Piece]) -> (usize, usize) {
 
 #[test]
 fn rounded_rectangle_is_four_lines_and_four_arcs() {
-    let ring = rounded_rect(60.0, 40.0, 5.0, 12);
+    let ring = rounded_rect(60.0, 40.0, 5.0, 36); // 2.5 degree steps: chord sag 0.0012 mm
     let (pieces, err) = segment_ring(&ring, 0.005);
     assert_eq!(counts(&pieces), (4, 4), "{pieces:?}");
     assert!(err < 0.005);
@@ -289,8 +303,8 @@ fn rounded_rectangle_is_four_lines_and_four_arcs() {
 fn stadium_slot_is_two_lines_and_two_half_circle_arcs() {
     let r = 4.0;
     let mut ring = Vec::new();
-    for k in 0..=24 { let a = (-90.0 + 180.0 * k as f64 / 24.0).to_radians(); ring.push([30.0 + r * a.cos(), r + r * a.sin()]); }
-    for k in 0..=24 { let a = (90.0 + 180.0 * k as f64 / 24.0).to_radians(); ring.push([10.0 + r * a.cos(), r + r * a.sin()]); }
+    for k in 0..=72 { let a = (-90.0 + 180.0 * k as f64 / 72.0).to_radians(); ring.push([30.0 + r * a.cos(), r + r * a.sin()]); }
+    for k in 0..=72 { let a = (90.0 + 180.0 * k as f64 / 72.0).to_radians(); ring.push([10.0 + r * a.cos(), r + r * a.sin()]); }
     let (pieces, err) = segment_ring(&ring, 0.005);
     assert_eq!(counts(&pieces), (2, 2), "{pieces:?}");
     assert!(err < 0.005);
@@ -327,4 +341,78 @@ fn coarse_tessellation_stays_a_polyline_within_budget() {
     let plan = analyze(&p, 0.05).unwrap();
     assert_eq!(plan.strategy, "extruded_layers", "{:?}", plan.notes);
     assert!(matches!(plan.layers[0].regions[0].outer, Loop::Polyline { .. }));
+}
+
+// ---------------------------------------------------------------- turned parts (revolve)
+fn arc_profile(points: &mut Vec<(f64, f64)>, cx: f64, cz: f64, r: f64, a0: f64, a1: f64, n: usize) {
+    for k in 0..=n {
+        let a = (a0 + (a1 - a0) * k as f64 / n as f64).to_radians();
+        points.push((cx + r * a.cos(), cz + r * a.sin()));
+    }
+}
+
+fn region_loops(p: &Plan) -> (usize, &Loop, usize) {
+    let r = p.revolve.as_ref().expect("a revolve plan");
+    (r.regions.len(), &r.regions[0].outer, r.regions[0].holes.len())
+}
+
+#[test]
+fn stepped_shaft_is_one_revolve_with_a_six_point_profile() {
+    let m = revolve_solid(&[(0.0, 0.0), (10.0, 0.0), (10.0, 20.0), (6.0, 20.0), (6.0, 40.0), (0.0, 40.0)], 180);
+    assert!(m.is_closed());
+    let p = tmp("shaft.stl");
+    write_stl(&m, &p);
+    let plan = analyze(&p, 0.05).unwrap();
+    assert_eq!(plan.strategy, "revolve", "{:?}", plan.notes);
+    assert!(plan.layers.is_empty());
+    let (n, outer, holes) = region_loops(&plan);
+    assert_eq!((n, holes), (1, 0));
+    match outer { Loop::Polyline { pts } => assert_eq!(pts.len(), 6), o => panic!("{o:?}") }
+    assert!(plan.deviation.as_ref().unwrap().max_mm + plan.simplify_error_mm <= 0.05);
+}
+
+#[test]
+fn knob_with_a_fillet_and_a_cone_has_an_arc_in_its_profile() {
+    let mut prof = vec![(0.0, 0.0), (14.0, 0.0), (14.0, 10.0)];
+    arc_profile(&mut prof, 10.0, 10.0, 4.0, 0.0, 90.0, 36); // quarter-round shoulder, r = 4
+    prof.extend_from_slice(&[(6.0, 26.0), (0.0, 26.0)]);        // cone, then flat top
+    let p = tmp("knob.stl");
+    write_stl(&revolve_solid(&prof, 240), &p);
+    let plan = analyze(&p, 0.05).unwrap();
+    assert_eq!(plan.strategy, "revolve", "{:?}", plan.notes);
+    match region_loops(&plan).1 {
+        Loop::Path { pieces } => {
+            let arcs: Vec<_> = pieces.iter().filter_map(|x| if let stl2cad::plan::PathPiece::Arc { r, .. } = x { Some(*r) } else { None }).collect();
+            assert_eq!(arcs.len(), 1, "{pieces:?}");
+            assert!((arcs[0] - 4.0).abs() < 0.02, "radius {}", arcs[0]);
+        }
+        o => panic!("expected a path with an arc, got {o:?}"),
+    }
+    assert!(plan.deviation.as_ref().unwrap().max_mm + plan.simplify_error_mm <= 0.05);
+}
+
+#[test]
+fn tilted_tube_revolve_has_an_annular_profile_that_misses_the_axis() {
+    let m = revolve_solid(&[(4.0, 0.0), (10.0, 0.0), (10.0, 20.0), (4.0, 20.0)], 180);
+    let m = transform(&m, [0.4, -0.2, 0.9], 1.1, [5.0, 3.0, -2.0]);
+    let p = tmp("tube.stl");
+    write_stl(&m, &p);
+    let plan = analyze(&p, 0.05).unwrap();
+    assert_eq!(plan.strategy, "revolve", "{:?}", plan.notes);
+    let (n, outer, _) = region_loops(&plan);
+    assert_eq!(n, 1);
+    // every profile point has radius >= 4: the profile does not touch the axis
+    match outer { Loop::Polyline { pts } => assert!(pts.iter().all(|q| q[0] > 3.9)), o => panic!("{o:?}") }
+    let f = plan.frame.unwrap();
+    for i in 0..3 { for j in 0..3 {
+        let d: f64 = (0..3).map(|k| f[k][i] * f[k][j]).sum();
+        assert!((d - if i == j { 1.0 } else { 0.0 }).abs() < 1e-6, "frame not orthonormal");
+    } }
+}
+
+#[test]
+fn a_plate_is_not_mistaken_for_a_turned_part() {
+    let p = tmp("plate_notturned.stl");
+    write_stl(&plate(), &p);
+    assert_eq!(analyze(&p, 0.05).unwrap().strategy, "extruded_layers");
 }

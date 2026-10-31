@@ -145,26 +145,35 @@ fn try_arc(pts: &[V2], tol: f64) -> Option<Piece> {
     let n = pts.len();
     if n < 4 { return None; }
     let (a, b) = (pts[0], pts[n - 1]);
-    // consistent turning direction: no reversals along the run
-    let mut sign = 0.0f64;
-    for w in pts.windows(3) {
-        let cr = (w[1][0] - w[0][0]) * (w[2][1] - w[1][1]) - (w[1][1] - w[0][1]) * (w[2][0] - w[1][0]);
-        if cr.abs() < 1e-12 { continue; }
-        if sign == 0.0 { sign = cr.signum(); } else if cr.signum() != sign { return None; }
-    }
     let fit = fit_circle(pts)?;
     let c = [fit.cx, fit.cy];
-    let (aa, ab) = ((a[1] - c[1]).atan2(a[0] - c[0]), (b[1] - c[1]).atan2(b[0] - c[0]));
-    // sweep from a to b in the turning direction (counter-clockwise when sign > 0)
-    let mut sweep = ab - aa;
-    if sign > 0.0 { while sweep <= 0.0 { sweep += std::f64::consts::TAU; } } else { while sweep >= 0.0 { sweep -= std::f64::consts::TAU; } }
-    if sweep.abs() > 340f64.to_radians() { return None; }
+    let ang = |p: V2| (p[1] - c[1]).atan2(p[0] - c[0]);
+    // angular progress around the fitted centre: one direction, allowing back-steps of noise size
+    let wrap = |d: f64| { let mut d = d; while d > std::f64::consts::PI { d -= std::f64::consts::TAU; } while d < -std::f64::consts::PI { d += std::f64::consts::TAU; } d };
+    let steps: Vec<f64> = pts.windows(2).map(|w| wrap(ang(w[1]) - ang(w[0]))).collect();
+    let sweep: f64 = steps.iter().sum();
+    let noise = 3.0 * tol / fit.r;
+    if steps.iter().any(|&d| d * sweep.signum() < -noise) { return None; }
+    let (aa, ab) = (ang(a), ang(b));
+    if sweep.abs() > 340f64.to_radians() || sweep.abs() < 1e-6 { return None; }
     let am = aa + sweep / 2.0;
     let m = [c[0] + fit.r * am.cos(), c[1] + fit.r * am.sin()];
     let (cc, r) = circumcircle(a, m, b)?; // the circle Fusion will draw through the three points
     if r < 3.0 * tol || r > 1e5 { return None; }
     let worst = pts.iter().map(|&p| (dist(p, cc) - r).abs()).fold(0.0, f64::max);
     if worst > tol { return None; }
+    // The STL surface between two listed points is the straight edge joining them, so the arc must
+    // also follow those edges: a long straight wall must not pass for a huge-radius arc.
+    for w in pts.windows(2) {
+        let l = dist(w[0], w[1]);
+        if l <= 4.0 * tol { continue; }
+        let k = ((l / (4.0 * tol)).ceil() as usize).min(16);
+        for i in 1..k {
+            let t = i as f64 / k as f64;
+            let q = [w[0][0] + t * (w[1][0] - w[0][0]), w[0][1] + t * (w[1][1] - w[0][1])];
+            if (dist(q, cc) - r).abs() > tol { return None; }
+        }
+    }
     Some(Piece::Arc { a, m, b })
 }
 
@@ -236,19 +245,67 @@ fn piece_polyline(p: &Piece) -> Vec<V2> {
     }
 }
 
-/// Split a closed ring at its corners and fit each smooth run as lines and three-point arcs.
-/// Returns the pieces (closed, in order) and the worst distance from the ring to them.
-pub fn segment_ring(ring: &[V2], tol: f64) -> (Vec<Piece>, f64) {
-    let n = ring.len();
-    let mut corners: Vec<usize> = Vec::new();
-    for i in 0..n {
-        let (p, a, b) = (ring[i], ring[(i + n - 1) % n], ring[(i + 1) % n]);
-        let (e1, e2) = ([p[0] - a[0], p[1] - a[1]], [b[0] - p[0], b[1] - p[1]]);
-        let (l1, l2) = ((e1[0] * e1[0] + e1[1] * e1[1]).sqrt(), (e2[0] * e2[0] + e2[1] * e2[1]).sqrt());
-        if l1 < 1e-12 || l2 < 1e-12 { continue; }
-        let c = ((e1[0] * e2[0] + e1[1] * e2[1]) / (l1 * l2)).clamp(-1.0, 1.0);
-        if c.acos() > 25f64.to_radians() { corners.push(i); }
+/// Drop consecutive points closer than `min_d` (crossings at a shared vertex repeat it).
+fn dedupe_ring(ring: &[V2], min_d: f64) -> Vec<V2> {
+    let mut out: Vec<V2> = Vec::with_capacity(ring.len());
+    for &p in ring {
+        if out.last().map_or(true, |&q| dist(p, q) >= min_d) { out.push(p); }
     }
+    while out.len() > 1 && dist(out[0], *out.last().unwrap()) < min_d { out.pop(); }
+    out
+}
+
+/// Corner vertices: where the direction changes by more than 25 degrees, measured over a short
+/// baseline (so micro-noise cannot fake or hide a corner), one vertex per corner.
+pub fn find_corners(ring: &[V2], baseline: f64) -> Vec<usize> {
+    let n = ring.len();
+    let seg: Vec<f64> = (0..n).map(|i| dist(ring[i], ring[(i + 1) % n])).collect();
+    let walk = |i: usize, fwd: bool| -> usize {
+        let (mut j, mut acc) = (i, 0.0);
+        for _ in 0..n / 2 {
+            let nj = if fwd { (j + 1) % n } else { (j + n - 1) % n };
+            acc += if fwd { seg[j] } else { seg[nj] };
+            j = nj;
+            if acc >= baseline { break; }
+        }
+        j
+    };
+    let angle: Vec<f64> = (0..n).map(|i| {
+        let (b, f) = (walk(i, false), walk(i, true));
+        let (e1, e2) = ([ring[i][0] - ring[b][0], ring[i][1] - ring[b][1]], [ring[f][0] - ring[i][0], ring[f][1] - ring[i][1]]);
+        let (l1, l2) = ((e1[0] * e1[0] + e1[1] * e1[1]).sqrt(), (e2[0] * e2[0] + e2[1] * e2[1]).sqrt());
+        if l1 < 1e-12 || l2 < 1e-12 { return 0.0; }
+        ((e1[0] * e2[0] + e1[1] * e2[1]) / (l1 * l2)).clamp(-1.0, 1.0).acos()
+    }).collect();
+    let thr = 25f64.to_radians();
+    let mut out = Vec::new();
+    for i in 0..n {
+        if angle[i] <= thr { continue; }
+        // keep only the sharpest vertex within one baseline of travel
+        let (mut best, mut d) = (true, 0.0);
+        for dir in [true, false] {
+            let (mut j, mut acc) = (i, 0.0);
+            for _ in 0..n / 2 {
+                let nj = if dir { (j + 1) % n } else { (j + n - 1) % n };
+                d = if dir { seg[j] } else { seg[nj] };
+                acc += d;
+                if acc > baseline { break; }
+                j = nj;
+                if angle[j] > angle[i] || (angle[j] == angle[i] && j < i) { best = false; }
+            }
+        }
+        if best { out.push(i); }
+    }
+    out
+}
+
+/// Split a closed ring at its corners and fit each smooth run as lines and three-point arcs.
+/// Returns the pieces (closed, in order) and the worst distance from the original ring to them.
+pub fn segment_ring(original: &[V2], tol: f64) -> (Vec<Piece>, f64) {
+    let ring = dedupe_ring(original, 1e-4);
+    let ring = &ring[..];
+    let n = ring.len();
+    let corners = find_corners(ring, (0.05f64).max(10.0 * tol));
     let mut parts: Vec<(Piece, Vec<V2>)> = Vec::new();
     if corners.is_empty() {
         // smooth ring: one cyclic run from the first point (the merge below joins across the seam)
@@ -294,7 +351,7 @@ pub fn segment_ring(ring: &[V2], tol: f64) -> (Vec<Piece>, f64) {
     let pieces: Vec<Piece> = parts.into_iter().map(|p| p.0).collect();
     let dense: Vec<V2> = pieces.iter().flat_map(piece_polyline).collect();
     let mut err: f64 = 0.0;
-    for &p in ring {
+    for &p in original {
         let d = (0..dense.len()).map(|i| point_segment_dist(p, dense[i], dense[(i + 1) % dense.len()])).fold(f64::INFINITY, f64::min);
         err = err.max(d);
     }

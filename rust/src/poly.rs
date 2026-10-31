@@ -146,6 +146,11 @@ pub fn clean(a: &[Poly]) -> Vec<Poly> {
     run(a, &[], OverlayRule::Union)
 }
 
+pub fn intersection(a: &[Poly], b: &[Poly]) -> Vec<Poly> {
+    if a.is_empty() || b.is_empty() { return vec![]; }
+    run(a, b, OverlayRule::Intersect)
+}
+
 pub fn difference(a: &[Poly], b: &[Poly]) -> Vec<Poly> {
     if a.is_empty() { return vec![]; }
     if b.is_empty() { return a.to_vec(); }

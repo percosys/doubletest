@@ -4,6 +4,8 @@ NOTE: the Fusion API calls here were written from the API's documented shape but
 NOT been run inside Fusion. See the repo README ("Fusion add-in: untested").
 """
 
+import math
+
 CM = 0.1  # plan is in millimetres, Fusion's API is in centimetres
 
 
@@ -148,9 +150,59 @@ def apply_treatments(core, fusion, root, bodies, plan):
     return notes
 
 
+def _move_bodies(core, root, bodies, F):
+    """Move the built bodies from the build frame into the mesh's pose (skipped if identity)."""
+    if not bodies or _is_identity(F):
+        return
+    V = core.Vector3D.create
+    m = core.Matrix3D.create()
+    m.setToAlignCoordinateSystems(
+        core.Point3D.create(0, 0, 0), V(1, 0, 0), V(0, 1, 0), V(0, 0, 1),
+        core.Point3D.create(F[0][3] * CM, F[1][3] * CM, F[2][3] * CM),
+        V(F[0][0], F[1][0], F[2][0]), V(F[0][1], F[1][1], F[2][1]), V(F[0][2], F[1][2], F[2][2]))
+    coll = core.ObjectCollection.create()
+    for b in bodies:
+        coll.add(b)
+    moves = root.features.moveFeatures
+    mi = moves.createInput2(coll)
+    mi.defineAsFreeMove(m)
+    moves.add(mi)
+
+
+def build_revolve(core, fusion, root, plan):
+    """A turned part: the profile sketched on XY (x = radius, y = along the axis) and revolved a
+    full turn about the Y axis, then moved into the mesh's pose. Returns (bodies, notes)."""
+    regions = plan["revolve"]["regions"]
+    diag = max(plan["stats"]["extents_mm"]) * CM
+    sk = root.sketches.add(root.xYConstructionPlane)
+    sk.name = "STL2CAD revolve profile"
+    for reg in regions:
+        for loop in [reg["outer"]] + reg["holes"]:
+            _draw_loop(core, sk, loop)
+    expected = [(r["area"] * CM * CM, r["centroid"][0] * CM, r["centroid"][1] * CM) for r in regions]
+    actual = []
+    for k in range(sk.profiles.count):
+        ap = sk.profiles.item(k).areaProperties()
+        actual.append((ap.area, ap.centroid.x, ap.centroid.y))
+    picks = match_profiles(expected, actual, dist_tol=0.005 * diag + 0.01)
+    coll = core.ObjectCollection.create()
+    for idx in picks:
+        coll.add(sk.profiles.item(idx))
+    revolves = root.features.revolveFeatures
+    inp = revolves.createInput(coll, root.yConstructionAxis, fusion.FeatureOperations.NewBodyFeatureOperation)
+    inp.setAngleExtent(False, core.ValueInput.createByReal(2 * math.pi))
+    feat = revolves.add(inp)
+    bodies = [feat.bodies.item(j) for j in range(feat.bodies.count)]
+    _move_bodies(core, root, bodies, plan["frame"])
+    return bodies, []
+
+
 def build_plan(core, fusion, root, plan):
     """Create one sketch + extrude per layer (join), then the edge treatments, then move the
-    result into the mesh pose. Returns (bodies, notes)."""
+    result into the mesh pose. A turned part (strategy "revolve") is one revolve instead.
+    Returns (bodies, notes)."""
+    if plan.get("strategy") == "revolve":
+        return build_revolve(core, fusion, root, plan)
     planes, sketches = root.constructionPlanes, root.sketches
     extrudes = root.features.extrudeFeatures
     diag = max(plan["stats"]["extents_mm"]) * CM
@@ -185,19 +237,5 @@ def build_plan(core, fusion, root, plan):
 
     notes = apply_treatments(core, fusion, root, bodies, plan)
 
-    F = plan["frame"]
-    if bodies and not _is_identity(F):
-        V = core.Vector3D.create
-        m = core.Matrix3D.create()
-        m.setToAlignCoordinateSystems(
-            core.Point3D.create(0, 0, 0), V(1, 0, 0), V(0, 1, 0), V(0, 0, 1),
-            core.Point3D.create(F[0][3] * CM, F[1][3] * CM, F[2][3] * CM),
-            V(F[0][0], F[1][0], F[2][0]), V(F[0][1], F[1][1], F[2][1]), V(F[0][2], F[1][2], F[2][2]))
-        coll = core.ObjectCollection.create()
-        for b in bodies:
-            coll.add(b)
-        moves = root.features.moveFeatures
-        mi = moves.createInput2(coll)
-        mi.defineAsFreeMove(m)
-        moves.add(mi)
+    _move_bodies(core, root, bodies, plan["frame"])
     return bodies, notes

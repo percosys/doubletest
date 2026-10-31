@@ -109,3 +109,25 @@ pub fn loft(sections: &[(f64, Vec<Ring>)]) -> Mesh {
 
 /// Rectangle inset by `o` on every side (a mitred offset), as a ring.
 pub fn inset_rect(x0: f64, y0: f64, x1: f64, y1: f64, o: f64) -> Ring { rect(x0 + o, y0 + o, x1 - o, y1 - o) }
+
+/// Solid of revolution about Z of a closed (radius, z) profile polygon (it may touch the axis).
+pub fn revolve_solid(profile: &[(f64, f64)], n: usize) -> Mesh {
+    let mut m = Mesh::default();
+    let k = profile.len();
+    for i in 0..k {
+        let (a, b) = (profile[i], profile[(i + 1) % k]);
+        if a.0.abs() < 1e-12 && b.0.abs() < 1e-12 { continue; }
+        let base = m.v.len() as u32;
+        for j in 0..=n {
+            let t = std::f64::consts::TAU * j as f64 / n as f64;
+            m.v.push([a.0 * t.cos(), a.0 * t.sin(), a.1]);
+            m.v.push([b.0 * t.cos(), b.0 * t.sin(), b.1]);
+        }
+        for j in 0..n {
+            let i0 = base + 2 * j as u32;
+            m.f.push([i0, i0 + 1, i0 + 3]);
+            m.f.push([i0, i0 + 3, i0 + 2]);
+        }
+    }
+    clean(&m, 1e-6)
+}

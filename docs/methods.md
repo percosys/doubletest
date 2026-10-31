@@ -84,13 +84,30 @@ A concave corner (material added) is measured the same way with the sign reverse
 A chamfer's two distances are reported with the face they belong to (the lower or upper face)
 so the CAD side can pick the right face.
 
-## M7. Turned parts by revolve
+## M7. Turned parts by revolve (implemented)
 
-If most of the surface is coaxial, find the axis from circle fits to sections at several heights
-(all centres agree) or from cylinder fits to the remaining faces. Cut the mesh by a plane through
-the axis; one half-section, radius r against position z along the axis, is the profile. Fit it
-with M5 (cylinder → constant r line, cone → sloped line, torus/sphere → arc) and close it along
-the axis. The result is a revolve through 360°.
+A part is *turned about Z* (in the frame of M2) if every section square to Z, sampled at 41 heights
+away from the end caps, consists only of circles (RMS radial residual under 0.5 % of the radius
+plus 0.2 x tolerance, no angular gap over 60 degrees) with one common centre (within a quarter of
+the tolerance plus 0.2 % of the radius). Tiny sections near a cone or sphere tip are ignored. This
+holds for cylinders, cones, tori and spheres alike, so one test covers all of them.
+
+The profile is the cut by the plane through the axis, restricted to radius >= 0. The mesh is
+re-indexed so that this plane becomes a height plane, the section is taken with M4, and the region is
+intersected with the half-plane. The region (axial, radial) is swapped to sketch coordinates
+(x = radius, y = axial) and fitted with M5: lines for cylinders, cones and planes, arcs for tori
+and spheres, a full circle for a torus cross-section.
+
+Verification revolves the raw profile polygon (angular step chosen so the revolve's own chord sag is
+under 10 % of the tolerance) and compares it with M9; the volume is Pappus' 2 pi x area x centroid
+radius. A turned part that passes is emitted as `strategy: "revolve"`; one that does not falls back
+to the layer method. The sketch plane is XY, the revolve is about the sketch Y axis, and the plan's
+frame maps that local frame to the mesh's pose.
+
+Known limits: a plane through the axis misses the tessellation's vertex lines by a tiny amount, so
+the profile carries sub-tolerance noise (a zigzag of ~0.0004 mm on a fine mesh). The fitter therefore
+measures corners over a short baseline, drops near-duplicate points, and allows noise-sized
+back-steps when it checks that an arc advances in one direction.
 
 ## M8. Holes across the main axis
 

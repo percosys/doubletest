@@ -231,3 +231,34 @@ def test_rust_worker_plan_is_accepted_by_the_builder():
     core, fusion, root = _fake_fusion(plan, calls)
     bodies, notes = plan_build.build_plan(core, fusion, root, plan)
     assert len(calls) == 1 and [p.kind for p in calls[0][0]] == ["material"]
+
+
+def test_rust_revolve_plan_builds_one_revolve_about_the_y_axis():
+    """Contract test: a turned-part plan from the Rust worker becomes sketch + revolve + move."""
+    import math
+    plan = json.loads((Path(__file__).parent / "fixtures" / "knob_revolve_plan.json").read_text())
+    assert plan["strategy"] == "revolve" and not plan["layers"]
+    reg = plan["revolve"]["regions"][0]
+    kinds = [p["kind"] for p in reg["outer"]["pieces"]]
+    assert kinds.count("arc") == 1 and abs(next(p["r"] for p in reg["outer"]["pieces"] if p["kind"] == "arc") - 4.0) < 0.02
+
+    core, fusion, root = MagicMock(), MagicMock(), MagicMock()
+    # the sketch yields exactly the material profile (area in cm^2, centroid in cm)
+    prof = MagicMock()
+    prof.areaProperties.return_value = MagicMock(area=reg["area"] / 100, centroid=MagicMock(
+        x=reg["centroid"][0] / 10, y=reg["centroid"][1] / 10))
+    sk = MagicMock(); sk.profiles.count = 1; sk.profiles.item.return_value = prof
+    root.sketches.add.return_value = sk
+    picked = []
+    core.ObjectCollection.create.side_effect = lambda: (lambda c: (setattr(c, "add", lambda o: picked.append(o)), c)[1])(MagicMock())
+    root.features.revolveFeatures.add.return_value.bodies.count = 1
+    bodies, notes = plan_build.build_plan(core, fusion, root, plan)
+    root.sketches.add.assert_called_once_with(root.xYConstructionPlane)
+    args = root.features.revolveFeatures.createInput.call_args[0]
+    assert args[1] is root.yConstructionAxis and args[2] is fusion.FeatureOperations.NewBodyFeatureOperation
+    assert picked[0] is prof
+    core.ValueInput.createByReal.assert_any_call(2 * math.pi)
+    assert len(bodies) == 1
+    # the pieces were drawn: three-point arcs and lines through shared sketch points
+    assert sk.sketchCurves.sketchArcs.addByThreePoints.call_count == 1
+    assert sk.sketchCurves.sketchLines.addByTwoPoints.call_count == 5

@@ -33,6 +33,11 @@ pub struct LayerOut {
     pub regions: Vec<Region>,
 }
 
+#[derive(Serialize, Clone, Debug)]
+pub struct RevolveOut {
+    pub regions: Vec<Region>,
+}
+
 #[derive(Serialize, Clone, Debug, Default)]
 pub struct DevOut {
     pub max_mm: f64,
@@ -50,6 +55,8 @@ pub struct Plan {
     pub tolerance_mm: f64,
     pub frame: Option<[[f64; 4]; 4]>,
     pub layers: Vec<LayerOut>,
+    /// For strategy "revolve": the profile in (radial, axial) sketch coordinates.
+    pub revolve: Option<RevolveOut>,
     pub deviation: Option<DevOut>,
     pub deviation_sharp: Option<DevOut>,
     pub treatments: Vec<serde_json::Value>,
@@ -66,7 +73,7 @@ impl Plan {
     pub fn new(tol: f64) -> Plan {
         Plan {
             version: 1, units: "mm", strategy: "mesh_convert".into(), tolerance_mm: tol, frame: None,
-            layers: vec![], deviation: None, deviation_sharp: None, treatments: vec![],
+            layers: vec![], revolve: None, deviation: None, deviation_sharp: None, treatments: vec![],
             circle_fit_error_mm: 0.0, simplify_error_mm: 0.0, review: vec![], notes: vec![],
             snapped: vec![], llm_calls: 0, stats: serde_json::json!({}),
         }

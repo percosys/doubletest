@@ -5,6 +5,7 @@ use crate::layers::*;
 use crate::mesh::{clean, read_stl, Mesh};
 use crate::plan::*;
 use crate::planes::{dominant_axes, make_frame, Frame};
+use crate::revolve::{build_profile, revolve_surface, turned_axis, Revolve};
 use crate::treatments::{detect, layer_sections, Treatment};
 use crate::verify::{deviation, surface_from_stacks, Stack};
 use std::time::Instant;
@@ -141,6 +142,26 @@ fn edge_descriptors(t: &Treatment, layer: &LayerOut, thr: f64) -> Vec<serde_json
     out
 }
 
+struct Turned {
+    matrix: [[f64; 4]; 4],
+    rev: Revolve,
+    dev: DevOut,
+}
+
+/// A part that is a surface of revolution about `axis`: profile + verification.
+fn try_revolve(mesh: &Mesh, axis: [f64; 3], tol: f64) -> Option<Turned> {
+    let frame = make_frame(mesh, axis);
+    let axis_xy = turned_axis(&frame.aligned, tol)?;
+    let rev = build_profile(&frame.aligned, axis_xy, 0.1 * tol)?;
+    let (m, vol) = revolve_surface(&rev.polys, axis_xy, tol);
+    let dev = deviation(&frame.aligned, &m, vol, 8000);
+    // sketch (u = radial, v = axial, w) -> aligned (u + cx, -w + cy, v), then aligned -> world
+    let r4 = [[1.0, 0.0, 0.0, axis_xy.0], [0.0, 0.0, -1.0, axis_xy.1], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
+    let mut mat = [[0.0; 4]; 4];
+    for i in 0..4 { for j in 0..4 { mat[i][j] = (0..4).map(|k| frame.matrix[i][k] * r4[k][j]).sum(); } }
+    Some(Turned { matrix: mat, rev, dev })
+}
+
 pub fn analyze(path: &str, tol: f64) -> Result<Plan, String> { analyze_with(path, tol, 6.0) }
 
 pub fn analyze_with(path: &str, tol: f64, max_edge: f64) -> Result<Plan, String> {
@@ -156,6 +177,22 @@ pub fn analyze_with(path: &str, tol: f64, max_edge: f64) -> Result<Plan, String>
     if !mesh.is_closed() {
         plan.notes.push("mesh is not watertight; 2.5D rebuild skipped".into());
         return Ok(finish(plan, t0));
+    }
+    // Turned parts: one revolve (it also covers cones and tori that layers cannot).
+    for axis in dominant_axes(&mesh, 3) {
+        if let Some(t) = try_revolve(&mesh, axis, tol) {
+            let label = format!("axis [{:.3}, {:.3}, {:.3}]", axis[0], axis[1], axis[2]);
+            plan.notes.push(format!("{label}: turned part, revolve max deviation {:.4} mm", t.dev.max_mm));
+            if t.dev.max_mm + t.rev.simp <= tol {
+                plan.strategy = "revolve".into();
+                plan.frame = Some(t.matrix);
+                plan.revolve = Some(RevolveOut { regions: t.rev.regions.clone() });
+                plan.simplify_error_mm = (t.rev.simp * 1e5).round() / 1e5;
+                plan.deviation = Some(t.dev);
+                return Ok(finish(plan, t0));
+            }
+            plan.notes.push("revolve is not within tolerance; trying layers".into());
+        }
     }
     let mut best: Option<Sharp> = None;
     let mut first: Option<Sharp> = None;

@@ -86,11 +86,14 @@ def convert(mesh_body, tol_mm, snap, fallback):
         plan = json.load(fh)
 
     lines = []
-    if plan["strategy"] == "extruded_layers":
+    if plan["strategy"] in ("extruded_layers", "revolve"):
         _, notes = plan_build.build_plan(adsk.core, adsk.fusion, root, plan)
         mesh_body.isLightBulbOn = False
         d = plan["deviation"]
-        lines.append("Built %d layer(s) as sketches + extrudes." % len(plan["layers"]))
+        if plan["strategy"] == "revolve":
+            lines.append("Built a turned part as one revolve of its profile.")
+        else:
+            lines.append("Built %d layer(s) as sketches + extrudes." % len(plan["layers"]))
         lines.append("Max deviation from the STL: %.4f mm (tolerance %.3f mm)." % (d["max_mm"], tol_mm))
         if plan.get("treatments"):
             lines.append("Edge treatments: %s." % ", ".join(

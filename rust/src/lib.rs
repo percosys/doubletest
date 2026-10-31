@@ -7,6 +7,7 @@ pub mod mesh;
 pub mod plan;
 pub mod planes;
 pub mod poly;
+pub mod revolve;
 pub mod section;
 pub mod treatments;
 pub mod testutil;

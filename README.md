@@ -18,8 +18,10 @@ select the mesh body, click **Convert Mesh to Model**.
 3. **Verify.** The rebuild is compared with the STL (exact two-sided surface distance + volume).
    The rebuilt solid is a stack of sections with lofted walls (no boolean union). It is accepted
    only if max deviation + fitting error <= tolerance (default 0.05 mm).
-4. **Fallback.** Otherwise the add-in falls back to Fusion's own mesh conversion.
-5. **Optional AI (off by default).** "Snap holes to standard sizes" asks JEV (TypeSafe) whether
+4. **Turned parts.** If every section square to the axis is a set of concentric circles, the part is
+   built as one revolve of its half-section (lines for cylinders/cones, arcs for tori/spheres).
+5. **Fallback.** Otherwise the add-in falls back to Fusion's own mesh conversion.
+6. **Optional AI (off by default).** "Snap holes to standard sizes" asks JEV (TypeSafe) whether
    each hole is a clearance or tap-drill screw hole (Python worker only). Geometry never depends
    on the AI, and a failed call is reported, not treated as an answer.
 
@@ -54,9 +56,10 @@ python -m stl2cad.worker part.stl --out plan.json [--tol 0.05] [--snap]
 
 ## Status
 
-Verified here: 21 Rust tests and 32 Python tests (generated parts, tilted/stepped/pocketed parts,
-slivers, chamfers, fillets, countersinks, rounded and slotted outlines, fallback decisions, plan
-contract between the Rust worker and the add-in builder), plus one real STL.
+Verified here: 26 Rust tests and 33 Python tests (generated parts, tilted/stepped/pocketed parts,
+slivers, chamfers, fillets, countersinks, rounded and slotted outlines, turned parts (shaft, knob
+with fillet and cone, tube, sphere), fallback decisions, plan contracts between the Rust worker and
+the add-in builder for layers and for a revolve), plus one real STL.
 - **Real STL (grinder disc holder, 219k faces, 85 mm tall):** `extruded_layers`, 3 layers + 6 edge
   treatments (0.26 mm bottom chamfer, 2 mm arm-top fillet, three 2 mm hole countersinks, 4 mm chamfer
   at the post base, 4 mm fillet on the post top), 0 AI calls. Max deviation 0.043 mm (tolerance
@@ -71,20 +74,22 @@ understand it, but I could not run Fusion or read the API reference from the bui
 Expect to fix some API details on first run. The builder's logic (profile matching, layer order,
 join vs new body, edge matching) is tested against a mock. The mesh-conversion fallback call is the
 least certain; if it fails the add-in tells you to use Mesh > Modify > Convert Mesh manually.
-The grinder plan has ~250 edges on its thin bottom layer's two treatments, which Fusion must match one by one.
+The grinder plan needs ~15 edge matches for each of its two bottom chamfers and 12 for the arm fillet.
 
 ## Limits and not yet done
 
 - Exact only for 2.5D parts (everything extruded along one axis), plus chamfers/fillets whose profile
-  is uniform along each edge run. **Not implemented yet** (specified in docs/methods.md): revolve for
-  turned parts (M7), holes across the main axis (M8), design-value rounding without the LLM (M10),
-  CAD-export-vs-scan detection (M11). Such parts fall back to mesh conversion.
+  is uniform along each edge run, and for turned parts (everything coaxial, one revolve).
+  **Not implemented yet** (specified in docs/methods.md): holes across the main axis (M8),
+  design-value rounding without the LLM (M10), CAD-export-vs-scan detection (M11), and parts that mix
+  a revolve with other features. Such parts fall back to mesh conversion.
 - Edge treatments are searched on one axis only (the one with the most flat area, unless another is
   twice as accurate).
 - Arcs are claimed only when the STL's tessellation sag is within 10 % of the tolerance; coarser
   tessellations stay polylines (still within tolerance).
 - Chamfers/fillets that vary along one edge run, or stop part-way along it, are approximated or skipped.
 - Results are plain sketches and extrudes, not named features; no dimensions/constraints yet.
-- The thin bottom layer of the grinder part still has ~240 line pieces (its outline is irregular at
-  that height); a fillet's exact tangent continuity at run ends is not enforced.
+- A fillet's exact tangent continuity at run ends is not enforced.
+- The revolve profile is read from one cut through the axis; on a coarse tessellation that cut can sit
+  up to the chord sag inside the true radius (verification measures it).
 - Not watertight meshes skip the 2.5D path.
