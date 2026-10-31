@@ -8,5 +8,6 @@ pub mod plan;
 pub mod planes;
 pub mod poly;
 pub mod section;
+pub mod treatments;
 pub mod testutil;
 pub mod verify;

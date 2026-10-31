@@ -61,3 +61,51 @@ pub fn write_stl(m: &Mesh, path: &str) {
     }
     std::fs::write(path, b).unwrap();
 }
+
+/// Loft between stacked sections that share one ring structure (ring 0 outer, then holes,
+/// each with the same vertex count in every section): slanted or curved side walls,
+/// flat end caps. Used to make chamfered, filleted and countersunk test parts.
+pub fn loft(sections: &[(f64, Vec<Ring>)]) -> Mesh {
+    use crate::poly::{ring_area_signed, triangulate};
+    let mut m = Mesh::default();
+    let orient = |r: &Ring, outer: bool| -> Ring {
+        let mut r = r.clone();
+        if (ring_area_signed(&r) > 0.0) != outer { r.reverse(); }
+        r
+    };
+    // orient every ring the same way in every section (outer CCW, holes CW), keeping vertex order
+    let secs: Vec<(f64, Vec<Ring>)> = sections.iter().map(|(z, rings)| {
+        (*z, rings.iter().enumerate().map(|(i, r)| orient(r, i == 0)).collect())
+    }).collect();
+    for w in secs.windows(2) {
+        let (z0, r0) = (&w[0].0, &w[0].1);
+        let (z1, r1) = (&w[1].0, &w[1].1);
+        for (ra, rb) in r0.iter().zip(r1.iter()) {
+            let n = ra.len();
+            for i in 0..n {
+                let j = (i + 1) % n;
+                let base = m.v.len() as u32;
+                m.v.extend_from_slice(&[[ra[i][0], ra[i][1], *z0], [ra[j][0], ra[j][1], *z0],
+                                        [rb[j][0], rb[j][1], *z1], [rb[i][0], rb[i][1], *z1]]);
+                m.f.push([base, base + 1, base + 2]);
+                m.f.push([base, base + 2, base + 3]);
+            }
+        }
+    }
+    for (idx, up) in [(0usize, false), (secs.len() - 1, true)] {
+        let (z, rings) = &secs[idx];
+        let p = Poly { outer: rings[0].clone(), holes: rings[1..].to_vec() };
+        let (v2, tris) = triangulate(&p);
+        let base = m.v.len() as u32;
+        for v in &v2 { m.v.push([v[0], v[1], *z]); }
+        for t in tris {
+            let ccw = ring_area_signed(&[v2[t[0]], v2[t[1]], v2[t[2]]]) > 0.0;
+            let (i, j, k) = (base + t[0] as u32, base + t[1] as u32, base + t[2] as u32);
+            if ccw == up { m.f.push([i, j, k]) } else { m.f.push([i, k, j]) }
+        }
+    }
+    clean(&m, 1e-6)
+}
+
+/// Rectangle inset by `o` on every side (a mitred offset), as a ring.
+pub fn inset_rect(x0: f64, y0: f64, x1: f64, y1: f64, o: f64) -> Ring { rect(x0 + o, y0 + o, x1 - o, y1 - o) }

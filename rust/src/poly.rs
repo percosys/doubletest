@@ -140,6 +140,12 @@ fn run(a: &[Poly], b: &[Poly], rule: OverlayRule) -> Vec<Poly> {
     from_shapes(sa.overlay(&sb, rule, FillRule::EvenOdd))
 }
 
+/// Resolve self-overlaps (even-odd) so displaced outlines stay valid polygons.
+pub fn clean(a: &[Poly]) -> Vec<Poly> {
+    if a.is_empty() { return vec![]; }
+    run(a, &[], OverlayRule::Union)
+}
+
 pub fn difference(a: &[Poly], b: &[Poly]) -> Vec<Poly> {
     if a.is_empty() { return vec![]; }
     if b.is_empty() { return a.to_vec(); }
