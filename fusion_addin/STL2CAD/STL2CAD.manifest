@@ -1,0 +1,13 @@
+{
+  "autodeskProduct": "Fusion",
+  "type": "addin",
+  "id": "0b6d6f0e-5a3c-4c1e-9b8e-5a2f4e8c7a11",
+  "author": "percosys",
+  "description": {
+    "": "Convert an inserted STL mesh body into a parametric solid: deterministic 2.5D rebuild with a tolerance check, falling back to mesh conversion."
+  },
+  "version": "0.1.0",
+  "runOnStartup": false,
+  "supportedOS": "windows|mac",
+  "editEnabled": true
+}

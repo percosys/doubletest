@@ -7,14 +7,15 @@ name = "stl2cad"
 version = "0.1.0"
 description = "Deterministic STL -> parametric CAD recipe pipeline with typed JEV judgments"
 requires-python = ">=3.10"
-dependencies = ["numpy", "scipy", "trimesh"]
+dependencies = ["numpy", "scipy", "trimesh", "shapely", "rtree", "manifold3d", "mapbox-earcut", "networkx"]
 
 [project.optional-dependencies]
 cad = ["cadquery"]
-dev = ["pytest", "manifold3d", "shapely", "mapbox-earcut"]
+dev = ["pytest"]
 
 [project.scripts]
 stl2cad = "stl2cad.cli:main"
+stl2cad-worker = "stl2cad.worker:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
