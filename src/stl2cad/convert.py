@@ -91,12 +91,12 @@ def _edge_descriptors(t: Treatment, plan_layer: dict, eps: float) -> list[dict]:
 def _sharp(raw, axis, tol: float):
     """Layers for one axis (no edge treatments), verified against the mesh."""
     frame: Frame = make_frame(raw, axis)
-    am, eps = frame.aligned_mesh, 0.2 * tol
+    am, eps = frame.aligned_mesh, 0.1 * tol
     layers0, fit_err, simp_err = build_layers(am, eps)
     _trace(f"axis {np.round(axis, 3).tolist()}: {len(layers0)} layers")
     merged = merge_slivers(layers0, tol)
     variants = [merged] + ([layers0] if len(merged) != len(layers0) else [])
-    best = None
+    best, results = None, []
     for layers in variants:
         dev = _verify(am, layers, [], tol)
         _trace(f"  {len(layers)} layers: max deviation {dev.max_mm:.4f} mm")
@@ -109,6 +109,8 @@ def _sharp(raw, axis, tol: float):
             best = res
         if dev.max_mm + simp_err <= tol:
             break
+    others = [r for r in results if r is not best]
+    best["alt"] = others[0] if others else None
     return best
 
 
@@ -163,7 +165,15 @@ def analyze(stl_path: str, tol: float = 0.05, snap: bool = False,
     if best is not None and best["dev"].max_mm + best["simp"] > tol:
         if first is not None and best is not first and best["dev"].max_mm > 0.5 * first["dev"].max_mm:
             best = first
-        best = _with_treatments(best, tol, max_edge)
+        final = None
+        for cand in [best] + ([best["alt"]] if best.get("alt") else []):
+            r = _with_treatments(cand, tol, max_edge)
+            if final is None or r["dev"].max_mm < final["dev"].max_mm:
+                final = r
+            if r["dev"].max_mm + r["simp"] <= tol and r["fit_err"] <= tol:
+                final = r  # first variant (the tidier merged one) that passes wins
+                break
+        best = final
         tried.append(f"edge treatments: {len(best['treatments'])} found, "
                      f"max deviation now {best['dev'].max_mm:.4f} mm")
 
