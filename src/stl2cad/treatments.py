@@ -11,11 +11,19 @@ from dataclasses import dataclass, field
 
 import numpy as np
 from scipy.optimize import least_squares
+import os
+import sys
+
 import shapely
 from shapely.geometry import LineString, Polygon
 from shapely.ops import unary_union
 
 from .layers import Layer, section_polygons, _union
+
+def _trace(msg: str) -> None:
+    if os.environ.get("STL2CAD_TRACE"):
+        print(f"[treat] {msg}", file=sys.stderr, flush=True)
+
 
 FAMILIES = ("convex_top", "convex_bottom", "concave_above", "concave_below")
 
@@ -161,9 +169,12 @@ def detect_treatments(am, layers: list[Layer], tol: float, max_size: float = 6.0
                     diff = ref.difference(sec) if removed else sec.difference(ref).intersection(foot)
                     o.append(_solve_offset(diff.intersection(near).area, curve, ref, removed, foot, max_size))
                 o = np.array(o)
+                _trace(f"z={z:.2f} {fam} len={piece.length:.1f} o={np.round(o, 3).tolist()}")
                 if o.max() < 0.5 * tol:
                     continue
                 kind, sxy, sz, rms = _fit(deltas, o)
+                _trace(f"   fit {kind} xy={sxy:.3f} z={sz:.3f} rms={rms:.4f} "
+                       f"(limit {max(0.3 * tol, 0.1 * o.max()):.4f})")
                 if rms > max(0.3 * tol, 0.1 * o.max()):
                     continue  # profile is neither a clean chamfer nor a fillet
                 out.append(Treatment(z, fam, kind, sxy, sz, rms, li, side, curve, foot))
