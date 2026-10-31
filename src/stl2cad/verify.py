@@ -37,12 +37,27 @@ def layers_to_mesh(layers: list[Layer]) -> trimesh.Trimesh:
     return trimesh.boolean.union(parts, engine="manifold")
 
 
+def _distances(mesh: trimesh.Trimesh, pts: np.ndarray, chunk: int = 500) -> np.ndarray:
+    """Exact point-to-surface distances, in chunks (trimesh builds candidate lists for
+    all query points at once, which needs gigabytes on 200k-face meshes)."""
+    return np.concatenate([trimesh.proximity.closest_point(mesh, pts[i:i + chunk])[1]
+                           for i in range(0, len(pts), chunk)])
+
+
+def surface_distances(original: trimesh.Trimesh, rebuilt: trimesh.Trimesh, n: int,
+                      seed: int = 0) -> tuple[np.ndarray, np.ndarray]:
+    """(sample points on `original`, their distance to `rebuilt`)."""
+    np.random.seed(seed)
+    pts = original.sample(n)
+    return pts, _distances(rebuilt, pts)
+
+
 def deviation(original: trimesh.Trimesh, rebuilt: trimesh.Trimesh, n: int = 8000,
               seed: int = 0) -> Deviation:
     """Two-sided surface distance between the meshes, plus volume difference."""
     np.random.seed(seed)  # trimesh.sample uses the global RNG
-    d1 = trimesh.proximity.closest_point(rebuilt, original.sample(n))[1]
-    d2 = trimesh.proximity.closest_point(original, rebuilt.sample(n))[1]
+    d1 = _distances(rebuilt, original.sample(n))
+    d2 = _distances(original, rebuilt.sample(n))
     d = np.r_[d1, d2]
     v0, v1 = abs(original.volume), abs(rebuilt.volume)
     return Deviation(float(d.max()), float(d.mean()), float(np.percentile(d, 99)),
