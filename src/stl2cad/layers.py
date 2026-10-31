@@ -98,10 +98,10 @@ def _fit_circle(pts: np.ndarray):
     return float(a), float(b), r, rms, gap
 
 
-def ring_to_loop(coords, eps: float) -> tuple[dict, float]:
+def ring_to_loop(coords, eps: float) -> tuple[dict, float, float]:
     """Closed ring -> circle if it is one, else a simplified polyline.
 
-    Returns (loop, circle_fit_error); the error is 0 for polylines.
+    Returns (loop, circle_fit_error, simplification_error); each is 0 when not applicable.
     """
     pts = np.asarray(coords)[:-1, :2]
     if len(pts) >= 16:
@@ -110,11 +110,12 @@ def ring_to_loop(coords, eps: float) -> tuple[dict, float]:
             cx, cy, r, rms, gap = fit
             if rms <= 0.002 * r + 1e-4 and gap <= np.radians(60):
                 return {"type": "circle", "cx": round(cx, 5), "cy": round(cy, 5),
-                        "r": round(r, 5)}, rms
+                        "r": round(r, 5)}, rms, 0.0
     simp = np.asarray(LinearRing(pts).simplify(eps, preserve_topology=False).coords)[:-1]
     if len(simp) < 3:
         simp = pts
-    return {"type": "polyline", "pts": [[round(float(a), 5), round(float(b), 5)] for a, b in simp]}, 0.0
+    err = float(LinearRing(pts).hausdorff_distance(LinearRing(simp)))
+    return {"type": "polyline", "pts": [[round(float(a), 5), round(float(b), 5)] for a, b in simp]}, 0.0, err
 
 
 def section_polygons(mesh: trimesh.Trimesh, z: float) -> list[Polygon]:
@@ -155,28 +156,30 @@ def _levels(am: trimesh.Trimesh, merge: float) -> list[float]:
     return out
 
 
-def build_layers(am: trimesh.Trimesh, simplify_eps: float) -> tuple[list[Layer], float]:
+def build_layers(am: trimesh.Trimesh, simplify_eps: float) -> tuple[list[Layer], float, float]:
     """Layers for an aligned mesh. Raises ValueError if the part has too many levels.
 
-    Returns (layers, max_circle_fit_error).
+    Returns (layers, max_circle_fit_error, max_simplification_error).
     """
     diag = float(np.linalg.norm(am.extents))
     levels = _levels(am, merge=max(1e-3, 1e-4 * diag))
     if len(levels) - 1 > MAX_LAYERS:
         raise ValueError(f"{len(levels) - 1} height levels (limit {MAX_LAYERS})")
     layers: list[Layer] = []
-    worst = 0.0
+    worst = worst_simp = 0.0
     for z0, z1 in zip(levels[:-1], levels[1:]):
         polys = section_polygons(am, (z0 + z1) / 2)
         regions = []
         for poly in polys:
-            outer, e0 = ring_to_loop(poly.exterior.coords, simplify_eps)
-            holes, errs = [], [e0]
+            outer, e0, s0 = ring_to_loop(poly.exterior.coords, simplify_eps)
+            holes, errs, simps = [], [e0], [s0]
             for ring in poly.interiors:
-                loop, e = ring_to_loop(ring.coords, simplify_eps)
+                loop, e, se = ring_to_loop(ring.coords, simplify_eps)
                 holes.append(loop)
                 errs.append(e)
+                simps.append(se)
             worst = max(worst, *errs)
+            worst_simp = max(worst_simp, *simps)
             c = poly.centroid
             regions.append(Region(outer, holes, float(poly.area), [float(c.x), float(c.y)]))
         layer = Layer(z0, z1, regions, polys)
@@ -184,7 +187,7 @@ def build_layers(am: trimesh.Trimesh, simplify_eps: float) -> tuple[list[Layer],
             layers[-1].z1 = z1  # identical cross-section: merge
             continue
         layers.append(layer)
-    return [l for l in layers if l.regions], worst
+    return [l for l in layers if l.regions], worst, worst_simp
 
 
 def _same(a: Layer, b: Layer) -> bool:
@@ -193,3 +196,35 @@ def _same(a: Layer, b: Layer) -> bool:
     from shapely.ops import unary_union
     ua, ub = unary_union(a.raw), unary_union(b.raw)
     return ua.symmetric_difference(ub).area <= 1e-6 * max(ua.area, 1.0)
+
+
+# ---------------------------------------------------------------- sliver merging
+def _union(layer: Layer):
+    from shapely.ops import unary_union
+    return unary_union(layer.raw) if layer.raw else Polygon()
+
+
+def merge_slivers(layers: list[Layer], min_thickness: float) -> list[Layer]:
+    """Merge layers thinner than ``min_thickness`` into the most similar neighbour.
+
+    Slivers come from tiny edge rounds and tessellation noise. Returns new Layer
+    objects (the inputs are not modified). The caller verifies the result.
+    """
+    ls = [Layer(l.z0, l.z1, l.regions, l.raw) for l in layers]
+    while len(ls) > 1:
+        thin = [i for i, l in enumerate(ls) if l.z1 - l.z0 < min_thickness]
+        if not thin:
+            break
+        i = min(thin, key=lambda i: ls[i].z1 - ls[i].z0)
+        nbrs = [j for j in (i - 1, i + 1) if 0 <= j < len(ls)]
+        ui = _union(ls[i])
+        j = min(nbrs, key=lambda j: ui.symmetric_difference(_union(ls[j])).area)
+        ls[j].z0, ls[j].z1 = min(ls[j].z0, ls[i].z0), max(ls[j].z1, ls[i].z1)
+        del ls[i]
+    out = [ls[0]]
+    for l in ls[1:]:  # neighbours that became identical are one layer
+        if _same(out[-1], l):
+            out[-1].z1 = l.z1
+        else:
+            out.append(l)
+    return out

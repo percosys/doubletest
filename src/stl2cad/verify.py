@@ -37,6 +37,21 @@ def layers_to_mesh(layers: list[Layer]) -> trimesh.Trimesh:
     return trimesh.boolean.union(parts, engine="manifold")
 
 
+def slabs_to_mesh(slabs) -> trimesh.Trimesh:
+    """Solid from (z0, z1, shapely geometry) slabs."""
+    parts = []
+    for z0, z1, g in slabs:
+        for poly in (g.geoms if hasattr(g, "geoms") else [g]):
+            if poly.geom_type != "Polygon" or poly.area < 1e-9:
+                continue
+            m = trimesh.creation.extrude_polygon(poly, z1 - z0)
+            m.apply_translation([0, 0, z0])
+            parts.append(m)
+    if not parts:
+        raise ValueError("no slabs")
+    return parts[0] if len(parts) == 1 else trimesh.boolean.union(parts, engine="manifold")
+
+
 def _distances(mesh: trimesh.Trimesh, pts: np.ndarray, chunk: int = 500) -> np.ndarray:
     """Exact point-to-surface distances, in chunks (trimesh builds candidate lists for
     all query points at once, which needs gigabytes on 200k-face meshes)."""

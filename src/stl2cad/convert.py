@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
 import time
 from dataclasses import dataclass, field
 
@@ -12,12 +14,21 @@ from . import mesh as meshmod
 from .classifier import JevError, Transport
 from .decisions import decide_hole
 from .features import Features, Hole
-from .layers import Frame, Layer, build_layers, candidate_axes, make_frame
+from shapely.geometry import Point
+
+from .layers import Frame, Layer, build_layers, candidate_axes, make_frame, merge_slivers
+from .treatments import Treatment, detect_treatments, layer_slabs
 from .questions import build_state, hole_questions
 from .segment import segment
-from .verify import Deviation, deviation, layers_to_mesh
+from .verify import deviation, layers_to_mesh, slabs_to_mesh
 
 PLAN_VERSION = 1
+_T0 = time.time()
+
+
+def _trace(msg: str) -> None:
+    if os.environ.get("STL2CAD_TRACE"):
+        print(f"[stl2cad {time.time() - _T0:6.1f}s] {msg}", file=sys.stderr, flush=True)
 
 
 @dataclass
@@ -27,8 +38,10 @@ class Plan:
     frame: list[list[float]] | None = None
     layers: list[dict] = field(default_factory=list)
     deviation: dict | None = None
+    deviation_sharp: dict | None = None  # layers only, before edge treatments
+    treatments: list[dict] = field(default_factory=list)
     circle_fit_error_mm: float = 0.0
-    simplify_eps_mm: float = 0.0
+    simplify_error_mm: float = 0.0
     review: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     snapped: list[dict] = field(default_factory=list)
@@ -45,16 +58,70 @@ def _layer_dict(L: Layer) -> dict:
                          "centroid": [round(c, 5) for c in r.centroid]} for r in L.regions]}
 
 
-def _attempt(raw, axis, tol: float):
+def _treated_mesh(layers: list[Layer], ts: list[Treatment], tol: float):
+    slabs = []
+    for k, L in enumerate(layers):
+        slabs += layer_slabs(L, k, ts, step=0.25 * tol)
+    return slabs_to_mesh(slabs)
+
+
+def _edge_descriptors(t: Treatment, plan_layer: dict, eps: float) -> list[dict]:
+    """Outline edges of the layer that lie on the treatment's curve (for Fusion edge picking)."""
+    thr = max(0.02, 2 * eps)
+    out = []
+    for r in plan_layer["regions"]:
+        for loop in [r["outer"]] + r["holes"]:
+            if loop["type"] == "circle":
+                c, rad = (loop["cx"], loop["cy"]), loop["r"]
+                pts = [Point(c[0] + rad * np.cos(a), c[1] + rad * np.sin(a)) for a in np.linspace(0, 6.2832, 16)]
+                if all(t.curve.distance(p) < thr for p in pts):
+                    out.append({"type": "circle", "cx": c[0], "cy": c[1], "r": rad, "z": round(t.z, 5)})
+            else:
+                P = loop["pts"]
+                for p0, p1 in zip(P, P[1:] + P[:1]):
+                    mid = Point((p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2)
+                    if t.curve.distance(mid) < thr and t.curve.distance(Point(*p0)) < thr:
+                        out.append({"type": "segment", "p0": p0, "p1": p1, "z": round(t.z, 5)})
+    return out
+
+
+def _sharp(raw, axis, tol: float):
+    """Layers for one axis (no edge treatments), verified against the mesh."""
     frame: Frame = make_frame(raw, axis)
-    eps = 0.2 * tol
-    layers, fit_err = build_layers(frame.aligned_mesh, eps)
-    dev = deviation(frame.aligned_mesh, layers_to_mesh(layers))
-    return frame, layers, fit_err, eps, dev
+    am, eps = frame.aligned_mesh, 0.2 * tol
+    layers0, fit_err, simp_err = build_layers(am, eps)
+    _trace(f"axis {np.round(axis, 3).tolist()}: {len(layers0)} layers")
+    merged = merge_slivers(layers0, tol)
+    variants = [merged] + ([layers0] if len(merged) != len(layers0) else [])
+    best = None
+    for layers in variants:
+        dev = deviation(am, layers_to_mesh(layers))
+        _trace(f"  {len(layers)} layers: max deviation {dev.max_mm:.4f} mm")
+        res = {"frame": frame, "layers": layers, "fit_err": fit_err, "eps": eps, "simp": simp_err,
+               "dev": dev, "dev_sharp": dev, "treatments": []}
+        if best is None or dev.max_mm < best["dev"].max_mm:
+            best = res
+        if dev.max_mm + simp_err <= tol:
+            break
+    return best
+
+
+def _with_treatments(res: dict, tol: float, max_edge: float) -> dict:
+    """Try to close the remaining gap with chamfers/fillets on the layer edges."""
+    am = res["frame"].aligned_mesh
+    ts = detect_treatments(am, res["layers"], tol, max_edge)
+    _trace(f"  {len(ts)} edge treatments detected")
+    if ts:
+        dev_t = deviation(am, _treated_mesh(res["layers"], ts, tol))
+        _trace(f"  with treatments: max deviation {dev_t.max_mm:.4f} mm")
+        if dev_t.max_mm < res["dev"].max_mm:
+            return {**res, "dev": dev_t, "treatments": ts}
+    return res
 
 
 def analyze(stl_path: str, tol: float = 0.05, snap: bool = False,
-            transport: Transport | None = None, snap_tol: float = 0.1) -> Plan:
+            transport: Transport | None = None, snap_tol: float = 0.1,
+            max_edge: float = 6.0) -> Plan:
     t0 = time.time()
     raw = meshmod.load_clean(stl_path)
     plan = Plan("mesh_convert", tol)
@@ -68,34 +135,54 @@ def analyze(stl_path: str, tol: float = 0.05, snap: bool = False,
 
     seg = segment(raw)
     plan.stats["unexplained_area_pct"] = round(100 * seg.unexplained_area_fraction, 1)
-    best = None
+    best = first = None
     tried = []
-    for axis in candidate_axes(seg):
+    for axis in candidate_axes(seg):  # ranked by flat area: the first is the main extrusion axis
         try:
-            frame, layers, fit_err, eps, dev = _attempt(raw, axis, tol)
+            res = _sharp(raw, axis, tol)
         except ValueError as e:
             tried.append(f"axis {np.round(axis, 3).tolist()}: {e}")
             continue
-        bound = dev.max_mm + eps
-        tried.append(f"axis {np.round(axis, 3).tolist()}: {len(layers)} layers, "
+        dev = res["dev"]
+        tried.append(f"axis {np.round(axis, 3).tolist()}: {len(res['layers'])} layers, "
                      f"max deviation {dev.max_mm:.4f} mm")
-        if best is None or bound < best[0]:
-            best = (bound, frame, layers, fit_err, eps, dev)
-        if bound <= tol and fit_err <= tol:
+        first = first or res
+        if best is None or dev.max_mm < best["dev"].max_mm:
+            best = res
+        if dev.max_mm + res["simp"] <= tol and res["fit_err"] <= tol:
             break
+    # Edge treatments are searched on one axis only, and only if needed. Sharp deviation
+    # does not predict recoverability (a chamfered plate is ~equally off along every axis),
+    # so keep the main axis unless another is at least twice as accurate.
+    if best is not None and best["dev"].max_mm + best["simp"] > tol:
+        if first is not None and best is not first and best["dev"].max_mm > 0.5 * first["dev"].max_mm:
+            best = first
+        best = _with_treatments(best, tol, max_edge)
+        tried.append(f"edge treatments: {len(best['treatments'])} found, "
+                     f"max deviation now {best['dev'].max_mm:.4f} mm")
 
     plan.notes += tried
     if best is not None:
-        bound, frame, layers, fit_err, eps, dev = best
+        dev, eps = best["dev"], best["eps"]
+        bound = dev.max_mm + best["simp"]
         plan.deviation = dev.to_dict()
-        plan.circle_fit_error_mm = round(fit_err, 5)
-        plan.simplify_eps_mm = round(eps, 5)
-        if bound <= tol and fit_err <= tol:
+        plan.deviation_sharp = best["dev_sharp"].to_dict()
+        plan.circle_fit_error_mm = round(best["fit_err"], 5)
+        plan.simplify_error_mm = round(best["simp"], 5)
+        if bound <= tol and best["fit_err"] <= tol:
             plan.strategy = "extruded_layers"
-            plan.frame = frame.matrix.tolist()
-            plan.layers = [_layer_dict(L) for L in layers]
+            plan.frame = best["frame"].matrix.tolist()
+            plan.layers = [_layer_dict(L) for L in best["layers"]]
+            for t in best["treatments"]:
+                edges = _edge_descriptors(t, plan.layers[t.layer], eps)
+                plan.treatments.append({
+                    "kind": t.kind, "family": t.family, "z": round(t.z, 5),
+                    "size_xy": round(t.size_xy, 4), "size_z": round(t.size_z, 4),
+                    "fit_rms_mm": round(t.rms, 5), "layer": t.layer, "edges": edges})
+                if not edges:
+                    plan.review.append(f"{t.kind} at z={t.z:.2f} could not be tied to outline edges; skipped")
             if snap:
-                _snap_holes(plan, frame, transport, snap_tol)
+                _snap_holes(plan, best["frame"], transport, snap_tol)
         else:
             plan.notes.append(
                 f"best 2.5D rebuild is off by up to {bound:.3f} mm (tolerance {tol} mm); "

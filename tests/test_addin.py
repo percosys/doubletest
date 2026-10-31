@@ -79,7 +79,7 @@ def test_builder_extrudes_only_material_profiles_per_layer(tmp_path):
     assert plan["strategy"] == "extruded_layers"
     calls = []
     core, fusion, root = _fake_fusion(plan, calls)
-    bodies = plan_build.build_plan(core, fusion, root, plan)
+    bodies, notes = plan_build.build_plan(core, fusion, root, plan)
     assert len(calls) == len(plan["layers"]) == 1
     items, op = calls[0]
     assert [p.kind for p in items] == ["material"]           # decoy hole discs excluded
@@ -113,3 +113,44 @@ def test_installer_copies_addin(tmp_path):
                            "--dest", str(dest), "--no-venv"])
     assert (dest / "STL2CAD.py").exists() and (dest / "STL2CAD.manifest").exists()
     assert json.loads((dest / "STL2CAD.manifest").read_text())["type"] == "addin"
+
+
+def test_match_edge_circle_and_segment_either_direction():
+    c = {"type": "circle", "cx": 10, "cy": 5, "r": 8, "z": 6}
+    assert plan_build.match_edge(c, {"type": "circle", "c": (1.0, 0.5, 0.6), "r": 0.8})
+    assert not plan_build.match_edge(c, {"type": "circle", "c": (1.0, 0.5, 0.6), "r": 0.9})
+    assert not plan_build.match_edge(c, {"type": "circle", "c": (1.0, 0.5, 0.0), "r": 0.8})  # wrong z
+    s = {"type": "segment", "p0": [0, 0], "p1": [30, 0], "z": 10}
+    fwd = {"type": "segment", "p0": (0, 0, 1.0), "p1": (3.0, 0, 1.0)}
+    rev = {"type": "segment", "p0": (3.0, 0, 1.0), "p1": (0, 0, 1.0)}
+    assert plan_build.match_edge(s, fwd) and plan_build.match_edge(s, rev)
+    assert not plan_build.match_edge(s, {"type": "circle", "c": (0, 0, 1.0), "r": 1})
+
+
+def test_apply_treatments_picks_edges_and_makes_fillet_and_chamfer(monkeypatch):
+    plan = {"treatments": [
+        {"kind": "fillet", "z": 6.0, "size_xy": 2.0, "size_z": 2.0,
+         "edges": [{"type": "circle", "cx": 0, "cy": 0, "r": 8, "z": 6.0}]},
+        {"kind": "chamfer", "z": 30.0, "size_xy": 1.0, "size_z": 1.0,
+         "edges": [{"type": "circle", "cx": 0, "cy": 0, "r": 7, "z": 30.0},
+                   {"type": "circle", "cx": 99, "cy": 0, "r": 7, "z": 30.0}]}]}  # second edge absent
+    edges = {"base": {"type": "circle", "c": (0, 0, 0.6), "r": 0.8},
+             "top": {"type": "circle", "c": (0, 0, 3.0), "r": 0.7},
+             "other": {"type": "circle", "c": (0, 0, 1.5), "r": 0.4}}
+    monkeypatch.setattr(plan_build, "_edge_info", lambda core, e: edges[e])
+    core, fusion, root = MagicMock(), MagicMock(), MagicMock()
+    body = MagicMock(); body.edges = list(edges)
+
+    class Coll:
+        def __init__(self): self.items = []
+        def add(self, o): self.items.append(o)
+        @property
+        def count(self): return len(self.items)
+
+    made = []
+    core.ObjectCollection.create.side_effect = lambda: made.append(Coll()) or made[-1]
+    notes = plan_build.apply_treatments(core, fusion, root, [body], plan)
+    assert [c.items for c in made] == [["base"], ["top"]]  # right edge per treatment, absent one skipped
+    assert root.features.filletFeatures.add.call_count == 1
+    assert root.features.chamferFeatures.add.call_count == 1
+    assert any("not found" in n for n in notes)  # the absent edge is reported, not silently dropped

@@ -8,12 +8,18 @@ select the mesh body, click **Convert Mesh to Model**.
 1. **Deterministic 2.5D rebuild (no LLM).** Find the main extrusion axis, cut the mesh into layers
    at every flat-face height, and take each layer's exact cross-section (circles stay circles,
    everything else becomes a simplified polyline). Plates, brackets, steps, pockets, bosses and
-   through/blind holes come out as sketches + extrudes (join).
-2. **Verify.** The rebuild is compared with the STL (exact two-sided surface distance + volume).
+   through/blind holes come out as sketches + extrudes (join). Layers thinner than the tolerance
+   (tessellation noise, tiny edge rounds) are merged into their most similar neighbour, and the
+   merge is kept only if verification still passes.
+2. **Edge treatments (no LLM).** If the sharp layered model is out of tolerance, the gap along each
+   layer outline is measured at several depths, giving an offset-versus-depth profile that is fitted
+   as a chamfer (straight) or fillet (quarter circle), convex or concave. They are added as Fusion
+   chamfer/fillet features on the matching edges and included in the verification model.
+3. **Verify.** The rebuild is compared with the STL (exact two-sided surface distance + volume).
    It is accepted only if max deviation + simplification <= tolerance (default 0.05 mm).
-3. **Fallback.** Otherwise the add-in falls back to Fusion's own mesh conversion, so you still
+4. **Fallback.** Otherwise the add-in falls back to Fusion's own mesh conversion, so you still
    get something faithful to the STL.
-4. **Optional AI (off by default).** "Snap holes to standard sizes" asks JEV (TypeSafe) whether
+5. **Optional AI (off by default).** "Snap holes to standard sizes" asks JEV (TypeSafe) whether
    each hole is a clearance or tap-drill screw hole; code does the size arithmetic and only
    changes a radius by <= 0.1 mm. Geometry never depends on the AI, and a failed call is reported,
    not treated as an answer.
@@ -59,8 +65,11 @@ add-in tells you to use Mesh > Modify > Convert Mesh manually.
 
 ## Limits
 
-- Exact only for 2.5D parts (everything extruded along one axis). Revolved/turned parts, sloped or
-  curved faces, fillets/chamfers along edges and organic shapes fall back to mesh conversion.
+- Exact only for 2.5D parts (everything extruded along one axis), plus chamfers/fillets whose profile
+  is uniform along each edge run. Revolved/turned parts, sloped or curved faces, variable-radius
+  blends, fillets larger than `--max-edge` (6 mm) and organic shapes fall back to mesh conversion.
+- Edge treatments are searched on one axis only (the one with the most flat area, unless another is
+  twice as accurate); an unusual part could have a better axis that is not tried.
 - Arcs in outlines (e.g. rounded corners) become many short line segments, not true arcs.
 - Circles are fitted to the STL's vertices; a coarse STL (few segments per circle) deviates from
   the true circle by up to its facet sagitta, which the deviation check does not count.

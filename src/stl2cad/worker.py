@@ -35,6 +35,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("stl")
     ap.add_argument("--out", required=True)
     ap.add_argument("--tol", type=float, default=0.05, help="max deviation in mm")
+    ap.add_argument("--max-edge", type=float, default=6.0, help="largest chamfer/fillet to look for, mm")
     ap.add_argument("--snap", action="store_true", help="snap holes to standard sizes (uses JEV)")
     ap.add_argument("--snap-tol", type=float, default=0.1, help="max radius change when snapping, mm")
     a = ap.parse_args(argv)
@@ -46,7 +47,8 @@ def main(argv: list[str] | None = None) -> int:
             transport = JevTransport(api_key=_api_key())
         except JevError as e:
             note = f"snap requested but unavailable: {e}"
-    plan = analyze(a.stl, a.tol, snap=a.snap, transport=transport, snap_tol=a.snap_tol)
+    plan = analyze(a.stl, a.tol, snap=a.snap, transport=transport, snap_tol=a.snap_tol,
+                   max_edge=a.max_edge)
     if note:
         plan.review.append(note)
     Path(a.out).write_text(plan.to_json())

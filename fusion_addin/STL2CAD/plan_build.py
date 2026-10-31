@@ -49,8 +49,78 @@ def _draw_loop(core, sketch, loop):
     lines.addByTwoPoints(prev.endSketchPoint, first.startSketchPoint)
 
 
+def match_edge(desc, info, tol=1e-3):
+    """Does a Fusion edge (info, in cm) match a plan edge descriptor (mm)?"""
+    near = lambda a, b: abs(a - b) <= tol
+    z = desc["z"] * CM
+    if desc["type"] == "circle":
+        if info["type"] != "circle":
+            return False
+        cx, cy, cz = info["c"]
+        return (near(cx, desc["cx"] * CM) and near(cy, desc["cy"] * CM) and near(cz, z)
+                and near(info["r"], desc["r"] * CM))
+    if info["type"] != "segment":
+        return False
+    p0 = (desc["p0"][0] * CM, desc["p0"][1] * CM, z)
+    p1 = (desc["p1"][0] * CM, desc["p1"][1] * CM, z)
+    same = lambda a, b: all(near(a[k], b[k]) for k in range(3))
+    return (same(p0, info["p0"]) and same(p1, info["p1"])) or (same(p0, info["p1"]) and same(p1, info["p0"]))
+
+
+def _edge_info(core, edge):
+    g = edge.geometry
+    if g.curveType == core.Curve3DTypes.Circle3DCurveType:
+        c = core.Circle3D.cast(g)
+        return {"type": "circle", "c": (c.center.x, c.center.y, c.center.z), "r": c.radius}
+    a, b = edge.startVertex.geometry, edge.endVertex.geometry
+    return {"type": "segment", "p0": (a.x, a.y, a.z), "p1": (b.x, b.y, b.z)}
+
+
+def apply_treatments(core, fusion, root, bodies, plan):
+    """Fillets and chamfers recovered from the STL. Returns notes about anything skipped.
+
+    Runs before the Move, so plan coordinates (aligned frame) are the body's coordinates.
+    """
+    notes = []
+    if not plan.get("treatments") or not bodies:
+        return notes
+    body = bodies[0]
+    V = core.ValueInput.createByReal
+    for t in plan["treatments"]:
+        infos = [(e, _edge_info(core, e)) for e in body.edges]  # edges change after each feature
+        sel = core.ObjectCollection.create()
+        for d in t["edges"]:
+            hits = [e for e, i in infos if match_edge(d, i)]
+            if not hits:
+                notes.append("%s at z=%.2f: edge %s not found" % (t["kind"], t["z"], d["type"]))
+            for e in hits:
+                sel.add(e)
+        if sel.count == 0:
+            continue
+        try:
+            if t["kind"] == "fillet":
+                fil = root.features.filletFeatures
+                inp = fil.createInput()
+                inp.addConstantRadiusEdgeSet(sel, V(t["size_xy"] * CM), True)
+                fil.add(inp)
+            else:
+                cha = root.features.chamferFeatures
+                inp = cha.createInput2()
+                if abs(t["size_xy"] - t["size_z"]) <= 0.15 * max(t["size_xy"], t["size_z"]):
+                    inp.chamferEdgeSets.addEqualDistanceChamferEdgeSet(sel, V(t["size_xy"] * CM), True)
+                else:  # which distance lands on which face is unverified
+                    inp.chamferEdgeSets.addTwoDistancesChamferEdgeSet(
+                        sel, V(t["size_z"] * CM), V(t["size_xy"] * CM), True)
+                    notes.append("asymmetric chamfer at z=%.2f: check its orientation" % t["z"])
+                cha.add(inp)
+        except Exception as ex:  # keep the sharp edges rather than fail the whole build
+            notes.append("%s at z=%.2f skipped: %s" % (t["kind"], t["z"], ex))
+    return notes
+
+
 def build_plan(core, fusion, root, plan):
-    """Create one sketch + extrude per layer (join), then move the result into the mesh pose."""
+    """Create one sketch + extrude per layer (join), then the edge treatments, then move the
+    result into the mesh pose. Returns (bodies, notes)."""
     planes, sketches = root.constructionPlanes, root.sketches
     extrudes = root.features.extrudeFeatures
     diag = max(plan["stats"]["extents_mm"]) * CM
@@ -83,6 +153,8 @@ def build_plan(core, fusion, root, plan):
         if i == 0:
             bodies = [ext.bodies.item(j) for j in range(ext.bodies.count)]
 
+    notes = apply_treatments(core, fusion, root, bodies, plan)
+
     F = plan["frame"]
     if bodies and not _is_identity(F):
         V = core.Vector3D.create
@@ -98,4 +170,4 @@ def build_plan(core, fusion, root, plan):
         mi = moves.createInput2(coll)
         mi.defineAsFreeMove(m)
         moves.add(mi)
-    return bodies
+    return bodies, notes

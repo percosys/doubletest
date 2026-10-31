@@ -77,11 +77,15 @@ def convert(mesh_body, tol_mm, snap, fallback):
 
     lines = []
     if plan["strategy"] == "extruded_layers":
-        plan_build.build_plan(adsk.core, adsk.fusion, root, plan)
+        _, notes = plan_build.build_plan(adsk.core, adsk.fusion, root, plan)
         mesh_body.isLightBulbOn = False
         d = plan["deviation"]
         lines.append("Built %d layer(s) as sketches + extrudes." % len(plan["layers"]))
         lines.append("Max deviation from the STL: %.4f mm (tolerance %.3f mm)." % (d["max_mm"], tol_mm))
+        if plan.get("treatments"):
+            lines.append("Edge treatments: %s." % ", ".join(
+                "%s %.2f mm" % (t["kind"], t["size_xy"]) for t in plan["treatments"]))
+        lines += ["Note: " + n for n in notes]
         if plan["snapped"]:
             lines.append("Snapped %d hole size(s) to standard sizes." % len(plan["snapped"]))
     else:
