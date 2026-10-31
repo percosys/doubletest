@@ -1,0 +1,174 @@
+use stl2cad::analyze::analyze;
+use stl2cad::bvh::Bvh;
+use stl2cad::fit::fit_circle;
+use stl2cad::mesh::{clean, parse_stl};
+use stl2cad::plan::{Loop, Plan};
+use stl2cad::section::section_loops;
+use stl2cad::testutil::*;
+
+fn tmp(name: &str) -> String {
+    let d = std::env::temp_dir().join(format!("stl2cad_rs_{}", std::process::id()));
+    std::fs::create_dir_all(&d).unwrap();
+    d.join(name).to_string_lossy().into_owned()
+}
+
+fn hole_diameters(p: &Plan) -> Vec<f64> {
+    let mut v: Vec<f64> = p.layers.iter().flat_map(|l| l.regions.iter()).flat_map(|r| r.holes.iter())
+        .filter_map(|h| if let Loop::Circle { r, .. } = h { Some((2.0 * r * 100.0).round() / 100.0) } else { None }).collect();
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    v
+}
+
+fn plate() -> stl2cad::mesh::Mesh {
+    slab_mesh(&[(0.0, 10.0, vec![poly(rect(0.0, 0.0, 60.0, 40.0),
+        vec![circle(15.0, 20.0, 1.7, 64), circle(45.0, 20.0, 2.75, 64)])])])
+}
+
+#[test]
+fn stl_roundtrip_and_closed() {
+    let m = plate();
+    assert!(m.is_closed());
+    let p = tmp("rt.stl");
+    write_stl(&m, &p);
+    let back = clean(&parse_stl(&std::fs::read(&p).unwrap()).unwrap(), 1e-5);
+    assert!((back.volume() - m.volume()).abs() < 1e-2 * m.volume() * 1e-2);
+    assert!((m.volume() - (60.0 * 40.0 - std::f64::consts::PI * (1.7f64.powi(2) + 2.75f64.powi(2))) * 10.0).abs() < 5.0);
+}
+
+#[test]
+fn section_of_a_plate_is_outline_plus_two_holes() {
+    let loops = section_loops(&plate(), 5.0);
+    assert_eq!(loops.len(), 3);
+}
+
+#[test]
+fn circle_fit_recovers_centre_and_radius() {
+    let c = fit_circle(&circle(3.0, -2.0, 7.5, 40)).unwrap();
+    assert!((c.cx - 3.0).abs() < 1e-9 && (c.cy + 2.0).abs() < 1e-9 && (c.r - 7.5).abs() < 1e-9 && c.rms < 1e-9);
+}
+
+#[test]
+fn bvh_distance_matches_brute_force() {
+    let m = plate();
+    let tris: Vec<_> = (0..m.f.len()).map(|i| m.tri(i)).collect();
+    let b = Bvh::new(tris.clone());
+    for p in [[30.0, 20.0, 5.0], [-5.0, 20.0, 5.0], [15.0, 20.0, 12.0], [61.0, 41.0, -2.0]] {
+        let brute = tris.iter().map(|t| {
+            let q = stl2cad::bvh::closest_on_triangle(p, t[0], t[1], t[2]);
+            ((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2) + (p[2] - q[2]).powi(2)).sqrt()
+        }).fold(f64::INFINITY, f64::min);
+        assert!((b.distance(p) - brute).abs() < 1e-9);
+    }
+    assert!((b.distance([-5.0, 20.0, 5.0]) - 5.0).abs() < 1e-9);
+}
+
+#[test]
+fn plate_with_holes_is_one_exact_layer() {
+    let p = tmp("plate.stl");
+    write_stl(&plate(), &p);
+    let plan = analyze(&p, 0.05).unwrap();
+    assert_eq!(plan.strategy, "extruded_layers", "{:?}", plan.notes);
+    assert_eq!(plan.layers.len(), 1);
+    assert!((plan.layers[0].z1 - plan.layers[0].z0 - 10.0).abs() < 1e-3);
+    assert_eq!(hole_diameters(&plan), vec![3.4, 5.5]);
+    assert!(plan.deviation.as_ref().unwrap().max_mm < 0.01);
+    assert_eq!(plan.llm_calls, 0);
+}
+
+#[test]
+fn tilted_plate_is_still_exact() {
+    let m = transform(&plate(), [0.3, 0.7, 0.2], 0.9, [12.0, -5.0, 3.0]);
+    let p = tmp("tilt.stl");
+    write_stl(&m, &p);
+    let plan = analyze(&p, 0.05).unwrap();
+    assert_eq!(plan.strategy, "extruded_layers", "{:?}", plan.notes);
+    assert_eq!(plan.layers.len(), 1);
+    assert_eq!(hole_diameters(&plan), vec![3.4, 5.5]);
+    let f = plan.frame.unwrap();
+    // rotation part is orthonormal
+    for i in 0..3 { for j in 0..3 {
+        let d: f64 = (0..3).map(|k| f[k][i] * f[k][j]).sum();
+        assert!((d - if i == j { 1.0 } else { 0.0 }).abs() < 1e-6);
+    } }
+}
+
+#[test]
+fn stepped_part_with_pocket_has_three_layers() {
+    let m = slab_mesh(&[
+        (0.0, 4.0, vec![poly(rect(0.0, 0.0, 60.0, 40.0), vec![rect(20.0, 15.0, 40.0, 25.0)])]),
+        (4.0, 5.0, vec![poly(rect(0.0, 0.0, 60.0, 40.0), vec![])]),
+        (5.0, 10.0, vec![poly(rect(15.0, 10.0, 45.0, 30.0), vec![])]),
+    ]);
+    let p = tmp("step.stl");
+    write_stl(&m, &p);
+    let plan = analyze(&p, 0.05).unwrap();
+    assert_eq!(plan.strategy, "extruded_layers", "{:?}", plan.notes);
+    assert_eq!(plan.layers.len(), 3);
+    assert!(plan.deviation.unwrap().max_mm < 0.01);
+}
+
+#[test]
+fn l_bracket_outline_is_a_six_point_polyline() {
+    let l = vec![[0.0, 0.0], [50.0, 0.0], [50.0, 10.0], [10.0, 10.0], [10.0, 40.0], [0.0, 40.0]];
+    let p = tmp("l.stl");
+    write_stl(&slab_mesh(&[(0.0, 8.0, vec![poly(l, vec![])])]), &p);
+    let plan = analyze(&p, 0.05).unwrap();
+    assert_eq!(plan.strategy, "extruded_layers", "{:?}", plan.notes);
+    match &plan.layers[0].regions[0].outer {
+        Loop::Polyline { pts } => assert_eq!(pts.len(), 6),
+        other => panic!("expected polyline, got {other:?}"),
+    }
+}
+
+#[test]
+fn matching_sliver_flange_is_merged_away() {
+    let m = slab_mesh(&[
+        (0.0, 2.5, vec![poly(rect(0.0, 0.0, 40.0, 40.0), vec![])]),
+        (2.5, 2.52, vec![poly(rect(-0.01, -0.01, 40.01, 40.01), vec![])]),
+        (2.52, 5.0, vec![poly(rect(0.0, 0.0, 40.0, 40.0), vec![])]),
+    ]);
+    let p = tmp("sliver.stl");
+    write_stl(&m, &p);
+    let plan = analyze(&p, 0.05).unwrap();
+    assert_eq!(plan.strategy, "extruded_layers", "{:?}", plan.notes);
+    assert_eq!(plan.layers.len(), 1);
+}
+
+#[test]
+fn thin_internal_cavity_is_not_merged_away() {
+    // A 0.03 mm cavity inside a 5 mm plate: merging that layer would fill it in, which
+    // verification must refuse (the cavity walls would be ~2.5 mm from the filled solid).
+    let m = slab_mesh(&[
+        (0.0, 2.485, vec![poly(rect(0.0, 0.0, 50.0, 30.0), vec![])]),
+        (2.485, 2.515, vec![poly(rect(0.0, 0.0, 50.0, 30.0), vec![rect(10.0, 8.0, 40.0, 22.0)])]),
+        (2.515, 5.0, vec![poly(rect(0.0, 0.0, 50.0, 30.0), vec![])]),
+    ]);
+    assert!(m.is_closed());
+    let p = tmp("cavity.stl");
+    write_stl(&m, &p);
+    let plan = analyze(&p, 0.05).unwrap();
+    assert_eq!(plan.strategy, "extruded_layers", "{:?}", plan.notes);
+    assert_eq!(plan.layers.len(), 3);
+    assert!(plan.deviation.unwrap().max_mm < 0.05);
+}
+
+#[test]
+fn sphere_falls_back_to_mesh_conversion() {
+    let p = tmp("sphere.stl");
+    write_stl(&uv_sphere(20.0, 40, 80), &p);
+    let plan = analyze(&p, 0.05).unwrap();
+    assert_eq!(plan.strategy, "mesh_convert");
+    assert!(plan.layers.is_empty());
+    assert!(plan.notes.iter().any(|n| n.contains("falling back") || n.contains("no 2.5D")));
+}
+
+#[test]
+fn open_mesh_is_not_rebuilt() {
+    let mut m = plate();
+    m.f.truncate(m.f.len() - 2);
+    let p = tmp("open.stl");
+    write_stl(&m, &p);
+    let plan = analyze(&p, 0.05).unwrap();
+    assert_eq!(plan.strategy, "mesh_convert");
+    assert!(plan.notes[0].contains("watertight"));
+}
