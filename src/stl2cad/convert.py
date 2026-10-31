@@ -102,8 +102,10 @@ def _sharp(raw, axis, tol: float):
         _trace(f"  {len(layers)} layers: max deviation {dev.max_mm:.4f} mm")
         res = {"frame": frame, "layers": layers, "fit_err": fit_err, "eps": eps, "simp": simp_err,
                "dev": dev, "dev_sharp": dev, "treatments": []}
-        # Prefer the merged (cleaner) variant unless the unmerged one is clearly better.
-        if best is None or dev.max_mm < best["dev"].max_mm - 0.1 * tol:
+        # Prefer the merged (cleaner) variant unless the unmerged one is much better: sharp
+        # deviations that differ by a few percent are sampling noise, while a merge that
+        # fills in a real cavity is off by orders of magnitude.
+        if best is None or dev.max_mm < 0.5 * best["dev"].max_mm:
             best = res
         if dev.max_mm + simp_err <= tol:
             break
