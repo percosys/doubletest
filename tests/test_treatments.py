@@ -75,3 +75,21 @@ def test_merge_slivers_unit():
     m = trimesh.creation.box((40, 40, 5))
     layers, _, _ = build_layers(m.copy().apply_translation([20, 20, 2.5]) or m, 0.01)
     assert len(layers) == 1 and merge_slivers(layers, 0.05)[0].z1 == layers[0].z1
+
+
+def test_hole_countersinks_and_outline_chamfer_are_fitted_separately(tmp_path):
+    plate = chamfered_plate(c=1.5, w=60, d=40, h=8)
+    cut = None
+    for x in (-15, 15):
+        cyl = trimesh.creation.cylinder(radius=2.25, height=30, sections=64); cyl.apply_translation([x, 0, 4])
+        prof = np.array([(0, 6.25), (2.25, 6.25), (4.0, 8.0), (4.0, 8.5), (0, 8.5)])  # 45 deg countersink
+        cs = trimesh.creation.revolve(prof, angle=2 * np.pi, sections=64); cs.apply_translation([x, 0, 0])
+        plate = plate.difference(cyl, engine="manifold").difference(cs, engine="manifold")
+    plan = analyze(save(plate, tmp_path), tol=0.05)
+    assert plan.strategy == "extruded_layers", plan.notes
+    sizes = sorted(round(t["size_xy"], 1) for t in plan.treatments if t["kind"] == "chamfer")
+    assert any(abs(s - 1.5) < 0.15 for s in sizes) and any(abs(s - 1.75) < 0.15 for s in sizes), sizes
+    # the two identical countersinks share one treatment (one Fusion feature)
+    cs_t = [t for t in plan.treatments if abs(t["size_xy"] - 1.75) < 0.15]
+    assert len(cs_t) == 1 and len(cs_t[0]["edges"]) == 2
+    assert plan.deviation["max_mm"] + plan.simplify_error_mm <= 0.05

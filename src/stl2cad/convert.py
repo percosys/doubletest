@@ -99,7 +99,8 @@ def _sharp(raw, axis, tol: float):
         _trace(f"  {len(layers)} layers: max deviation {dev.max_mm:.4f} mm")
         res = {"frame": frame, "layers": layers, "fit_err": fit_err, "eps": eps, "simp": simp_err,
                "dev": dev, "dev_sharp": dev, "treatments": []}
-        if best is None or dev.max_mm < best["dev"].max_mm:
+        # Prefer the merged (cleaner) variant unless the unmerged one is clearly better.
+        if best is None or dev.max_mm < best["dev"].max_mm - 0.1 * tol:
             best = res
         if dev.max_mm + simp_err <= tol:
             break

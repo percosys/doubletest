@@ -11,7 +11,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 from scipy.optimize import least_squares
-from shapely.geometry import Polygon
+import shapely
+from shapely.geometry import LineString, Polygon
 from shapely.ops import unary_union
 
 from .layers import Layer, section_polygons, _union
@@ -137,29 +138,55 @@ def detect_treatments(am, layers: list[Layer], tol: float, max_size: float = 6.0
                          k + 1, "above", B, True, None))
             if A is not None:
                 fams.append(("concave_above", bb.intersection(A.buffer(-eps)), k + 1, "above", B, False, A))
-        for fam, curve, li, side, ref, removed, foot in fams:
-            if curve.is_empty or curve.length < 1.0:
+        for fam, curve_all, li, side, ref, removed, foot in fams:
+            if curve_all.is_empty:
                 continue
-            curve = curve.simplify(SIMPLIFY)
             th = layers[li].z1 - layers[li].z0
             dmin, dmax = max(0.02, 0.2 * tol), min(max_size, 0.45 * th)
             if dmax < 2 * dmin:
                 continue
             deltas = np.geomspace(dmin, dmax, 9)
-            near = curve.buffer(max_size, cap_style=2, quad_segs=4)
-            o = []
-            for d in deltas:
-                zs = z - d if side == "below" else z + d
-                sec = section(zs)
-                diff = ref.difference(sec) if removed else sec.difference(ref).intersection(foot)
-                o.append(_solve_offset(diff.intersection(near).area, curve, ref, removed, foot, max_size))
-            o = np.array(o)
-            if o.max() < 0.5 * tol:
-                continue
-            kind, sxy, sz, rms = _fit(deltas, o)
-            if rms > max(0.3 * tol, 0.1 * o.max()):
-                continue  # profile is neither a clean chamfer nor a fillet
-            out.append(Treatment(z, fam, kind, sxy, sz, rms, li, side, curve, foot))
+            # Fit each connected edge loop on its own: a hole's countersink must not be
+            # averaged away by a much longer outline with a different profile.
+            merged = shapely.line_merge(curve_all)
+            pieces = [g for g in (merged.geoms if hasattr(merged, "geoms") else [merged])
+                      if isinstance(g, LineString) and g.length >= 1.0]
+            for piece in pieces:
+                curve = piece.simplify(SIMPLIFY)
+                near = curve.buffer(max_size, cap_style=2, quad_segs=4)
+                o = []
+                for d in deltas:
+                    zs = z - d if side == "below" else z + d
+                    sec = section(zs)
+                    diff = ref.difference(sec) if removed else sec.difference(ref).intersection(foot)
+                    o.append(_solve_offset(diff.intersection(near).area, curve, ref, removed, foot, max_size))
+                o = np.array(o)
+                if o.max() < 0.5 * tol:
+                    continue
+                kind, sxy, sz, rms = _fit(deltas, o)
+                if rms > max(0.3 * tol, 0.1 * o.max()):
+                    continue  # profile is neither a clean chamfer nor a fillet
+                out.append(Treatment(z, fam, kind, sxy, sz, rms, li, side, curve, foot))
+    return _group(out, tol)
+
+
+def _group(ts: list[Treatment], tol: float) -> list[Treatment]:
+    """Loops that came out the same (kind, level, size) become one treatment / one Fusion feature."""
+    q = max(0.05, tol)
+    groups: dict[tuple, list[Treatment]] = {}
+    for t in ts:
+        key = (round(t.z, 3), t.family, t.kind, t.layer, round(t.size_xy / q), round(t.size_z / q))
+        groups.setdefault(key, []).append(t)
+    out = []
+    for g in groups.values():
+        t0 = g[0]
+        if len(g) > 1:
+            w = np.array([t.curve.length for t in g])
+            t0 = Treatment(t0.z, t0.family, t0.kind, float(np.average([t.size_xy for t in g], weights=w)),
+                           float(np.average([t.size_z for t in g], weights=w)), max(t.rms for t in g),
+                           t0.layer, t0.side, unary_union([t.curve for t in g]), t0.foot)
+        out.append(t0)
+    return out
     return out
 
 
