@@ -24,16 +24,22 @@ Outputs: `request_state.json` (exact JEV input), `recipe.json`, `model.py` (CadQ
 
 ## Status
 
-Works (tested on synthetic parts): alignment, plane/cylinder segmentation, hole/boss detection,
-hole-size snapping to ISO clearance and tap-drill sizes, review flags for unsettled judgments,
-CadQuery emission of stock + holes.
+Works: alignment, plane/cylinder segmentation, hole/boss detection, hole-size snapping to ISO
+clearance and tap-drill sizes, review flags for unsettled judgments, CadQuery emission of stock + holes,
+and the live `JevTransport` (`POST /v1/systemone`, default model `jev-1.14.0`, key from
+`TYPESAFE_API_KEY`, request/response logged to `log_path`, any failure raises `JevError`).
+
+Live probe (jev-1.14.0, 8 requests over two runs on synthetic plates and a sphere): standard clearance/tap holes
+were judged intentional + fastener (0.84-0.95) with the right purpose; a sphere was `organic_freeform`
+(0.99) and not a mechanical part (0.03). Ambiguous cases landed in the unsettled band and are
+flagged for review: a 12 mm hole (`fastener` 0.32) and a 0.6 mm hole (`intentional` 0.41).
+This is a small sample on synthetic parts, not a benchmark; run it on real parts before trusting the bands.
+
+Design note: Jev is weak at numeric comparison, so code computes the nearest standard size and the
+percent difference and passes them as words ("under 2 percent"); Jev only judges meaning.
 
 Not done:
-- **`JevTransport.ask` is not implemented.** The TypeSafe docs and API were unreachable when this
-  was scaffolded, so the request/response mapping is unverified. Implement it against
-  https://docs.typesafe.ai/go/api.md, raise `JevError` on any failure, and re-tune questions with
-  real answers.
 - Bosses, fillets/arcs, angled faces, pockets, patterns, revolve/shell strategies are detected
   (where noted) but not emitted.
 - No geometric verification loop yet (rebuilt STEP vs. input STL).
-- Question wording is a first draft and untested against JEV.
+- Untested on real STLs; only synthetic parts so far.

@@ -78,3 +78,26 @@ def test_end_to_end_offline(stl, tmp_path):
     code = emit(r)
     compile(code, "model.py", "exec")
     assert code.count("makeCylinder") == 2
+
+
+def test_jev_payload_and_parse_offline():
+    from stl2cad.classifier import JevError, JevTransport
+    from stl2cad.questions import hole_questions
+
+    qs = hole_questions("hole_1")
+    pq = {q.id: JevTransport.payload_question(q) for q in qs}
+    assert pq["hole_1.fastener"]["type"] == "noul"
+    assert set(pq["hole_1.fastener"]["criteria"]) == {"true", "false"}
+    assert pq["hole_1.purpose"]["type"] == "choice" and "tap_pilot" in pq["hole_1.purpose"]["criteria"]
+
+    opts = {k: 0.25 for k in qs[2].options}
+    data = {"answers": {"hole_1.intentional": {"type": "noul", "noul": 0.9},
+                        "hole_1.fastener": {"type": "noul", "noul": 0.2},
+                        "hole_1.purpose": {"type": "choice", "choice": "tap_pilot",
+                                           "confidence": 0.1, "probabilities": opts}}}
+    out = JevTransport._parse(qs, data)
+    assert out["hole_1.intentional"].p_true == 0.9
+    with pytest.raises(JevError):  # a missing answer is an error, never a "no"
+        JevTransport._parse(qs, {"answers": {}})
+    with pytest.raises(JevError):
+        JevTransport._parse(qs, {})

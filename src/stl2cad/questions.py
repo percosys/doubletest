@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from .features import Features
+from .standards import deviation_words, nearest
 
 
 @dataclass(frozen=True)
@@ -70,9 +71,9 @@ def part_questions() -> list[Question]:
         Question("part_type", "choice",
                  "Which kind of part is `part`?", options=PART_TYPES),
         Question("part_type_fits", "noul",
-                 "Does one of the part kinds describe `part`?",
-                 true_criterion="`part` is mostly flat faces and cylinders, as a machined or moulded part is.",
-                 false_criterion="`part` is smooth and curved everywhere, like a scan of a statue."),
+                 "Is `part` a machined or moulded part made mostly of flat faces and round holes or bosses?",
+                 true_criterion="Most of `part` is flat faces, with round holes or bosses.",
+                 false_criterion="`part` is smooth and curved everywhere, like a sculpture or a ball."),
     ]
 
 
@@ -85,8 +86,8 @@ def hole_questions(hole_id: str) -> list[Question]:
                  false_criterion="It is a dent, a casting void or a scan artefact."),
         Question(f"{hole_id}.fastener", "noul",
                  f"Is `{p}` meant to take a screw or bolt?",
-                 true_criterion="The diameter is close to a metric screw clearance or tap-drill size.",
-                 false_criterion="The diameter is far from any screw size, or the hole is very large."),
+                 true_criterion="The hole is a screw hole of a standard size.",
+                 false_criterion="The hole is not a standard screw size."),
         Question(f"{hole_id}.purpose", "choice",
                  f"What is `{p}` for?", options=HOLE_PURPOSES),
     ]
@@ -104,6 +105,17 @@ def arc_questions(arc_id: str) -> list[Question]:
     ]
 
 
+def _hole_state(h) -> dict:
+    # The size comparison is arithmetic, so code does it and JEV reads the words.
+    label, size, rel = nearest(h.diameter)
+    return {
+        "diameter_mm": h.diameter,
+        "depth_mm": h.depth,
+        "nearest_standard_screw_hole": f"{label}, {size} mm",
+        "difference_from_that_size": deviation_words(rel),
+    }
+
+
 def build_state(feats: Features) -> dict:
     """Named-field state. Only facts a person would look at; nothing irrelevant."""
     return {
@@ -117,8 +129,7 @@ def build_state(feats: Features) -> dict:
             "surface_not_flat_or_cylindrical_percent": round(100 * feats.unexplained_area_fraction, 1),
         },
         "features": {
-            **{h.id: {"diameter_mm": h.diameter, "depth_mm": h.depth,
-                      "part_thickness_along_axis_mm": None} for h in feats.holes},
+            **{h.id: _hole_state(h) for h in feats.holes},
             **{a.id: {"radius_mm": a.radius, "length_mm": a.length,
                       "angular_extent_deg": a.coverage_deg,
                       "surface_faces_inward": a.concave} for a in feats.arcs},
