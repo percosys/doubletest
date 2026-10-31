@@ -49,19 +49,25 @@ pytest
 
 ## Status
 
-Verified here (18 tests, plus runs on synthetic parts and one real STL):
-- Analysis, layer extraction, circle detection, tilted parts, stepped parts with pockets,
-  non-rectangular outlines, verification, fallback decision, optional JEV snap, installer, units.
+Verified here (28 tests, synthetic parts, and one real STL):
+- Analysis, layer extraction, sliver merging, circle detection, tilted parts, stepped parts with
+  pockets, non-rectangular outlines, chamfer/fillet recovery (convex and concave, per edge loop),
+  verification, fallback decision, optional JEV snap, installer, units.
 - Live JEV calls (jev-1.14.0) for the hole-intent questions.
-- Real STL (3-arm grinder disc holder, 219k faces): nearly 2.5D (5 layers, mean deviation 0.08 mm,
-  volume error 0.18%) but 2.8 mm worst-case, so it correctly falls back. Analysis took ~75 s.
+- **Real STL (grinder disc holder, 219k faces, 85 mm tall):** `extruded_layers`, 3 layers + 6 edge
+  treatments (0.26 mm bottom chamfer, 2 mm arm-top fillet, 2 mm hole countersinks, 4 mm chamfer at
+  the post base, 4 mm fillet on the post top), 0 AI calls. Max deviation 0.042 mm (tolerance 0.05),
+  mean 0.0014 mm. Before edge treatments it was 2.8 mm off and fell back. Takes ~2 min, ~1.2 GB.
+  The deviation is a sampled estimate (16,000 points); an independent 40,000-point check gave
+  0.045 mm max, so the margin to 0.05 is thin.
 
 **Not verified: the Fusion add-in itself.** `STL2CAD.py` and `plan_build.py` use the Fusion API
-(mesh export, sketches, extrudes, Move feature, mesh conversion) as I understand it, but I could
-not run Fusion or read the API reference from the build environment. Expect to fix some API
-details on first run. The builder's logic (profile matching, layer order, join vs new body) is
-tested against a mock. The mesh-conversion fallback call is the least certain; if it fails the
-add-in tells you to use Mesh > Modify > Convert Mesh manually.
+(mesh export, sketches, extrudes, fillet/chamfer features, Move feature, mesh conversion) as I
+understand it, but I could not run Fusion or read the API reference from the build environment.
+Expect to fix some API details on first run. The builder's logic (profile matching, layer order,
+join vs new body, edge matching) is tested against a mock. The mesh-conversion fallback call is the
+least certain; if it fails the add-in tells you to use Mesh > Modify > Convert Mesh manually.
+The grinder plan has ~330 outline edges per treatment, which Fusion must match one by one.
 
 ## Limits
 
