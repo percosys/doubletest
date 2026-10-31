@@ -7,6 +7,15 @@ use serde::Serialize;
 pub enum Loop {
     Circle { cx: f64, cy: f64, r: f64 },
     Polyline { pts: Vec<[f64; 2]> },
+    /// Exact lines and three-point arcs, in order, closed.
+    Path { pieces: Vec<PathPiece> },
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum PathPiece {
+    Line { a: [f64; 2], b: [f64; 2] },
+    Arc { a: [f64; 2], m: [f64; 2], b: [f64; 2], cx: f64, cy: f64, r: f64 },
 }
 
 #[derive(Serialize, Clone, Debug)]

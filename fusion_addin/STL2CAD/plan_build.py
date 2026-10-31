@@ -40,6 +40,22 @@ def _draw_loop(core, sketch, loop):
     if loop["type"] == "circle":
         sketch.sketchCurves.sketchCircles.addByCenterRadius(P(loop["cx"], loop["cy"]), loop["r"] * CM)
         return
+    if loop["type"] == "path":
+        # exact lines and three-point arcs, joined end to end through shared sketch points
+        lines, arcs = sketch.sketchCurves.sketchLines, sketch.sketchCurves.sketchArcs
+        pieces = loop["pieces"]
+        first_start, prev_end = None, None
+        for i, pc in enumerate(pieces):
+            start = prev_end if prev_end is not None else P(*pc["a"])
+            end = first_start if (i == len(pieces) - 1 and first_start is not None) else P(*pc["b"])
+            if pc["kind"] == "line":
+                ent = lines.addByTwoPoints(start, end)
+            else:
+                ent = arcs.addByThreePoints(start, P(*pc["m"]), end)
+            if first_start is None:
+                first_start = ent.startSketchPoint
+            prev_end = ent.endSketchPoint
+        return
     pts = loop["pts"]
     lines = sketch.sketchCurves.sketchLines
     first = lines.addByTwoPoints(P(*pts[0]), P(*pts[1]))
@@ -59,6 +75,16 @@ def match_edge(desc, info, tol=1e-3):
         cx, cy, cz = info["c"]
         return (near(cx, desc["cx"] * CM) and near(cy, desc["cy"] * CM) and near(cz, z)
                 and near(info["r"], desc["r"] * CM))
+    if desc["type"] == "arc":
+        if info["type"] != "arc":
+            return False
+        a = (desc["a"][0] * CM, desc["a"][1] * CM, z)
+        b = (desc["b"][0] * CM, desc["b"][1] * CM, z)
+        cx, cy, cz = info["c"]
+        same = lambda p, q: all(near(p[k], q[k]) for k in range(3))
+        ends = (same(a, info["p0"]) and same(b, info["p1"])) or (same(a, info["p1"]) and same(b, info["p0"]))
+        return ends and near(cx, desc["cx"] * CM) and near(cy, desc["cy"] * CM) and near(cz, z) \
+            and near(info["r"], desc["r"] * CM)
     if info["type"] != "segment":
         return False
     p0 = (desc["p0"][0] * CM, desc["p0"][1] * CM, z)
@@ -73,6 +99,10 @@ def _edge_info(core, edge):
         c = core.Circle3D.cast(g)
         return {"type": "circle", "c": (c.center.x, c.center.y, c.center.z), "r": c.radius}
     a, b = edge.startVertex.geometry, edge.endVertex.geometry
+    if g.curveType == core.Curve3DTypes.Arc3DCurveType:
+        arc = core.Arc3D.cast(g)
+        return {"type": "arc", "c": (arc.center.x, arc.center.y, arc.center.z), "r": arc.radius,
+                "p0": (a.x, a.y, a.z), "p1": (b.x, b.y, b.z)}
     return {"type": "segment", "p0": (a.x, a.y, a.z), "p1": (b.x, b.y, b.z)}
 
 

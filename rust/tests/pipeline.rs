@@ -248,3 +248,83 @@ fn hole_countersinks_and_outline_chamfer_are_fitted_separately() {
     assert!(e.iter().all(|x| x["type"] == "circle"));
     assert!(plan.deviation.as_ref().unwrap().max_mm + plan.simplify_error_mm <= 0.05);
 }
+
+// ---------------------------------------------------------------- exact lines and arcs
+use stl2cad::fit::{segment_ring, Piece};
+use stl2cad::geom::*;
+
+/// Rounded rectangle, counter-clockwise, `n` points per quarter circle.
+fn rounded_rect(w: f64, d: f64, r: f64, n: usize) -> Vec<[f64; 2]> {
+    let mut out = Vec::new();
+    let corners = [(w - r, r, -90.0), (w - r, d - r, 0.0), (r, d - r, 90.0), (r, r, 180.0)];
+    for (cx, cy, start) in corners {
+        for k in 0..=n {
+            let a = (start + 90.0 * k as f64 / n as f64).to_radians();
+            out.push([cx + r * a.cos(), cy + r * a.sin()]);
+        }
+    }
+    out
+}
+
+fn counts(pieces: &[Piece]) -> (usize, usize) {
+    (pieces.iter().filter(|p| matches!(p, Piece::Line { .. })).count(),
+     pieces.iter().filter(|p| matches!(p, Piece::Arc { .. })).count())
+}
+
+#[test]
+fn rounded_rectangle_is_four_lines_and_four_arcs() {
+    let ring = rounded_rect(60.0, 40.0, 5.0, 12);
+    let (pieces, err) = segment_ring(&ring, 0.005);
+    assert_eq!(counts(&pieces), (4, 4), "{pieces:?}");
+    assert!(err < 0.005);
+    for p in &pieces {
+        if let Piece::Arc { a, m, b } = p {
+            let (_, r) = stl2cad::fit::circumcircle(*a, *m, *b).unwrap();
+            assert!((r - 5.0).abs() < 0.01, "radius {r}");
+        }
+    }
+}
+
+#[test]
+fn stadium_slot_is_two_lines_and_two_half_circle_arcs() {
+    let r = 4.0;
+    let mut ring = Vec::new();
+    for k in 0..=24 { let a = (-90.0 + 180.0 * k as f64 / 24.0).to_radians(); ring.push([30.0 + r * a.cos(), r + r * a.sin()]); }
+    for k in 0..=24 { let a = (90.0 + 180.0 * k as f64 / 24.0).to_radians(); ring.push([10.0 + r * a.cos(), r + r * a.sin()]); }
+    let (pieces, err) = segment_ring(&ring, 0.005);
+    assert_eq!(counts(&pieces), (2, 2), "{pieces:?}");
+    assert!(err < 0.005);
+}
+
+#[test]
+fn polygon_stays_lines_only() {
+    let l = vec![[0.0, 0.0], [50.0, 0.0], [50.0, 10.0], [10.0, 10.0], [10.0, 40.0], [0.0, 40.0]];
+    let (pieces, _) = segment_ring(&l, 0.005);
+    assert_eq!(counts(&pieces), (6, 0));
+}
+
+#[test]
+fn rounded_plate_outline_becomes_a_path_with_arcs() {
+    // 2.5 degree steps: chord sag 0.0012 mm, inside the arc budget (10 % of the tolerance)
+    let m = slab_mesh(&[(0.0, 6.0, vec![poly(rounded_rect(60.0, 40.0, 5.0, 36), vec![])])]);
+    let p = tmp("rounded.stl");
+    write_stl(&m, &p);
+    let plan = analyze(&p, 0.05).unwrap();
+    assert_eq!(plan.strategy, "extruded_layers", "{:?}", plan.notes);
+    match &plan.layers[0].regions[0].outer {
+        Loop::Path { pieces } => assert_eq!(pieces.len(), 8),
+        other => panic!("expected a path of 8 pieces, got {other:?}"),
+    }
+    assert!(plan.deviation.as_ref().unwrap().max_mm + plan.simplify_error_mm <= 0.05);
+}
+
+#[test]
+fn coarse_tessellation_stays_a_polyline_within_budget() {
+    // 7.5 degree steps: chord sag 0.011 mm exceeds the 0.005 mm arc budget, so no arcs are claimed
+    let m = slab_mesh(&[(0.0, 6.0, vec![poly(rounded_rect(60.0, 40.0, 5.0, 12), vec![])])]);
+    let p = tmp("rounded_coarse.stl");
+    write_stl(&m, &p);
+    let plan = analyze(&p, 0.05).unwrap();
+    assert_eq!(plan.strategy, "extruded_layers", "{:?}", plan.notes);
+    assert!(matches!(plan.layers[0].regions[0].outer, Loop::Polyline { .. }));
+}

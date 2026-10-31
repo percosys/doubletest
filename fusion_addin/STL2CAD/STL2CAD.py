@@ -42,6 +42,18 @@ def _worker_python():
                        "STL2CAD_PYTHON to a Python that has the stl2cad package installed.")
 
 
+def _worker_cmd(stl, plan_path, tol_mm, snap):
+    """The compiled Rust worker when present (fast, no Python needed); else the Python worker.
+    The AI snap step is only in the Python worker."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    exe = os.environ.get("STL2CAD_WORKER") or os.path.join(
+        here, "bin", "stl2cad-worker.exe" if os.name == "nt" else "stl2cad-worker")
+    if os.path.exists(exe) and not snap:
+        return [exe, stl, "--out", plan_path, "--tol", str(tol_mm)]
+    cmd = [_worker_python(), "-m", "stl2cad.worker", stl, "--out", plan_path, "--tol", str(tol_mm)]
+    return cmd + (["--snap"] if snap else [])
+
+
 def _try_mesh_convert(root, mesh_body):
     """Fusion's own mesh -> solid conversion (faceted). API surface unverified."""
     try:
@@ -63,10 +75,8 @@ def convert(mesh_body, tol_mm, snap, fallback):
     stl, plan_path = os.path.join(tmp, "in.stl"), os.path.join(tmp, "plan.json")
     n = stl_io.write_binary_stl(stl, tm.nodeCoordinatesAsDouble, tm.nodeIndices, scale=10.0)
 
-    cmd = [_worker_python(), "-m", "stl2cad.worker", stl, "--out", plan_path, "--tol", str(tol_mm)]
-    if snap:
-        cmd.append("--snap")
-    _ui.messageBox("Analysing %d triangles. This can take a minute or two; click OK to start." % n,
+    cmd = _worker_cmd(stl, plan_path, tol_mm, snap)
+    _ui.messageBox("Analysing %d triangles. This takes a few seconds (up to a minute or two with the Python worker); click OK to start." % n,
                    "STL2CAD")
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=1800,
                           creationflags=0x08000000 if os.name == "nt" else 0)

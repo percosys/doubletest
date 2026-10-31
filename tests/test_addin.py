@@ -154,3 +154,80 @@ def test_apply_treatments_picks_edges_and_makes_fillet_and_chamfer(monkeypatch):
     assert root.features.filletFeatures.add.call_count == 1
     assert root.features.chamferFeatures.add.call_count == 1
     assert any("not found" in n for n in notes)  # the absent edge is reported, not silently dropped
+
+
+def test_path_loop_is_drawn_with_lines_and_three_point_arcs_joined_end_to_end():
+    core, sk = MagicMock(), MagicMock()
+    made = []
+
+    def entity(*_a):
+        e = MagicMock(); e.startSketchPoint, e.endSketchPoint = object(), object()
+        made.append(e)
+        return e
+
+    lines, arcs = sk.sketchCurves.sketchLines, sk.sketchCurves.sketchArcs
+    lines.addByTwoPoints.side_effect = entity
+    arcs.addByThreePoints.side_effect = entity
+    loop = {"type": "path", "pieces": [
+        {"kind": "line", "a": [0, 0], "b": [10, 0]},
+        {"kind": "arc", "a": [10, 0], "m": [12, 2], "b": [10, 4], "cx": 10, "cy": 2, "r": 2},
+        {"kind": "line", "a": [10, 4], "b": [0, 0]}]}
+    plan_build._draw_loop(core, sk, loop)
+    assert lines.addByTwoPoints.call_count == 2 and arcs.addByThreePoints.call_count == 1
+    # pieces share sketch points: the arc starts where the first line ended ...
+    assert arcs.addByThreePoints.call_args[0][0] is made[0].endSketchPoint
+    # ... and the last line closes onto the first piece's start point
+    assert lines.addByTwoPoints.call_args_list[-1][0][1] is made[0].startSketchPoint
+
+
+def test_match_edge_arc_either_direction():
+    d = {"type": "arc", "a": [10, 0], "b": [10, 4], "cx": 10, "cy": 2, "r": 2, "z": 5}
+    info = {"type": "arc", "c": (1.0, 0.2, 0.5), "r": 0.2, "p0": (1.0, 0.0, 0.5), "p1": (1.0, 0.4, 0.5)}
+    assert plan_build.match_edge(d, info)
+    assert plan_build.match_edge(d, {**info, "p0": info["p1"], "p1": info["p0"]})
+    assert not plan_build.match_edge(d, {**info, "r": 0.3})
+    assert not plan_build.match_edge(d, {"type": "segment", "p0": (1.0, 0.0, 0.5), "p1": (1.0, 0.4, 0.5)})
+
+
+def _import_addin(monkeypatch):
+    import types
+    fake = types.SimpleNamespace(
+        core=types.SimpleNamespace(Application=MagicMock(), CommandEventHandler=object,
+                                   CommandCreatedEventHandler=object),
+        fusion=types.SimpleNamespace())
+    monkeypatch.setitem(sys.modules, "adsk", fake)
+    monkeypatch.setitem(sys.modules, "adsk.core", fake.core)
+    monkeypatch.setitem(sys.modules, "adsk.fusion", fake.fusion)
+    sys.modules.pop("STL2CAD", None)
+    import importlib
+    return importlib.import_module("STL2CAD")
+
+
+def test_addin_prefers_the_compiled_worker_but_uses_python_for_snap(monkeypatch, tmp_path):
+    mod = _import_addin(monkeypatch)
+    exe = tmp_path / "stl2cad-worker"
+    exe.write_text("#!/bin/sh\n")
+    monkeypatch.setenv("STL2CAD_WORKER", str(exe))
+    monkeypatch.setenv("STL2CAD_PYTHON", sys.executable)
+    cmd = mod._worker_cmd("in.stl", "plan.json", 0.05, snap=False)
+    assert cmd[0] == str(exe) and "--tol" in cmd and "-m" not in cmd
+    cmd = mod._worker_cmd("in.stl", "plan.json", 0.05, snap=True)
+    assert cmd[0] == sys.executable and "stl2cad.worker" in cmd and "--snap" in cmd
+    monkeypatch.setenv("STL2CAD_WORKER", str(tmp_path / "missing"))
+    assert mod._worker_cmd("in.stl", "plan.json", 0.05, snap=False)[0] == sys.executable
+
+
+def test_rust_worker_plan_is_accepted_by_the_builder():
+    """Contract test: a plan written by the Rust worker (rounded plate with a hole) builds."""
+    plan = json.loads((Path(__file__).parent / "fixtures" / "rounded_plate_plan.json").read_text())
+    assert plan["version"] == 1 and plan["strategy"] == "extruded_layers"
+    outer = plan["layers"][0]["regions"][0]["outer"]
+    assert outer["type"] == "path"
+    pieces = outer["pieces"]
+    assert sum(p["kind"] == "arc" for p in pieces) == 4 and sum(p["kind"] == "line" for p in pieces) == 4
+    assert all(abs(p["r"] - 5.0) < 0.01 for p in pieces if p["kind"] == "arc")
+    assert plan["layers"][0]["regions"][0]["holes"][0]["type"] == "circle"
+    calls = []
+    core, fusion, root = _fake_fusion(plan, calls)
+    bodies, notes = plan_build.build_plan(core, fusion, root, plan)
+    assert len(calls) == 1 and [p.kind for p in calls[0][0]] == ["material"]

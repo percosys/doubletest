@@ -120,3 +120,183 @@ pub fn max_dist_to_ring(a: &[V2], b: &[V2]) -> f64 {
     a.iter().map(|&p| (0..b.len()).map(|i| point_segment_dist(p, b[i], b[(i + 1) % b.len()])).fold(f64::INFINITY, f64::min))
         .fold(0.0, f64::max)
 }
+
+// ------------------------------------------------------------------ lines and arcs (method M5)
+
+#[derive(Clone, Copy, Debug)]
+pub enum Piece {
+    Line { a: V2, b: V2 },
+    /// Three-point arc: start, a point on it, end.
+    Arc { a: V2, m: V2, b: V2 },
+}
+
+/// Circle through three points: (centre, radius), None if collinear.
+pub fn circumcircle(a: V2, b: V2, c: V2) -> Option<(V2, f64)> {
+    let d = 2.0 * (a[0] * (b[1] - c[1]) + b[0] * (c[1] - a[1]) + c[0] * (a[1] - b[1]));
+    if d.abs() < 1e-12 { return None; }
+    let (a2, b2, c2) = (a[0] * a[0] + a[1] * a[1], b[0] * b[0] + b[1] * b[1], c[0] * c[0] + c[1] * c[1]);
+    let ux = (a2 * (b[1] - c[1]) + b2 * (c[1] - a[1]) + c2 * (a[1] - b[1])) / d;
+    let uy = (a2 * (c[0] - b[0]) + b2 * (a[0] - c[0]) + c2 * (b[0] - a[0])) / d;
+    Some(([ux, uy], dist([ux, uy], a)))
+}
+
+/// A run of points as one three-point arc, if it is one within `tol`.
+fn try_arc(pts: &[V2], tol: f64) -> Option<Piece> {
+    let n = pts.len();
+    if n < 4 { return None; }
+    let (a, b) = (pts[0], pts[n - 1]);
+    // consistent turning direction: no reversals along the run
+    let mut sign = 0.0f64;
+    for w in pts.windows(3) {
+        let cr = (w[1][0] - w[0][0]) * (w[2][1] - w[1][1]) - (w[1][1] - w[0][1]) * (w[2][0] - w[1][0]);
+        if cr.abs() < 1e-12 { continue; }
+        if sign == 0.0 { sign = cr.signum(); } else if cr.signum() != sign { return None; }
+    }
+    let fit = fit_circle(pts)?;
+    let c = [fit.cx, fit.cy];
+    let (aa, ab) = ((a[1] - c[1]).atan2(a[0] - c[0]), (b[1] - c[1]).atan2(b[0] - c[0]));
+    // sweep from a to b in the turning direction (counter-clockwise when sign > 0)
+    let mut sweep = ab - aa;
+    if sign > 0.0 { while sweep <= 0.0 { sweep += std::f64::consts::TAU; } } else { while sweep >= 0.0 { sweep -= std::f64::consts::TAU; } }
+    if sweep.abs() > 340f64.to_radians() { return None; }
+    let am = aa + sweep / 2.0;
+    let m = [c[0] + fit.r * am.cos(), c[1] + fit.r * am.sin()];
+    let (cc, r) = circumcircle(a, m, b)?; // the circle Fusion will draw through the three points
+    if r < 3.0 * tol || r > 1e5 { return None; }
+    let worst = pts.iter().map(|&p| (dist(p, cc) - r).abs()).fold(0.0, f64::max);
+    if worst > tol { return None; }
+    Some(Piece::Arc { a, m, b })
+}
+
+fn fit_run(pts: &[V2], tol: f64, depth: usize, out: &mut Vec<(Piece, Vec<V2>)>) {
+    let (a, b) = (pts[0], pts[pts.len() - 1]);
+    if pts.len() <= 2 { out.push((Piece::Line { a, b }, pts.to_vec())); return; }
+    let (mut k, mut dmax) = (0usize, 0.0f64);
+    for (i, &p) in pts.iter().enumerate() {
+        let d = point_segment_dist(p, a, b);
+        if d > dmax { dmax = d; k = i; }
+    }
+    if dmax <= tol { out.push((Piece::Line { a, b }, pts.to_vec())); return; }
+    if let Some(arc) = try_arc(pts, tol) { out.push((arc, pts.to_vec())); return; }
+    if depth > 24 || k == 0 || k == pts.len() - 1 { out.push((Piece::Line { a, b }, pts.to_vec())); return; }
+    fit_run(&pts[..=k], tol, depth + 1, out);
+    fit_run(&pts[k..], tol, depth + 1, out);
+}
+
+/// Largest end index in `lo..=hi` with `ok(end)`, given `ok(lo)`: gallop out, then bisect.
+fn max_end(lo: usize, hi: usize, ok: impl Fn(usize) -> bool) -> usize {
+    let (mut good, mut step) = (lo, 1usize);
+    let mut bad = hi + 1;
+    while good + step <= hi {
+        if ok(good + step) { good += step; step *= 2; } else { bad = good + step; break; }
+    }
+    while bad - good > 1 {
+        let mid = (good + bad) / 2;
+        if ok(mid) { good = mid } else { bad = mid }
+    }
+    good
+}
+
+/// Greedy longest-piece-first segmentation of an open run: from each start, extend a line and an
+/// arc as far as each stays within `tol`, keep the one that reaches further, continue from there.
+fn greedy_run(pts: &[V2], tol: f64, out: &mut Vec<(Piece, Vec<V2>)>) {
+    let last = pts.len() - 1;
+    let mut i = 0;
+    while i < last {
+        let line_end = max_end(i + 1, last, |e| pts[i..=e].iter().all(|&p| point_segment_dist(p, pts[i], pts[e]) <= tol));
+        let arc_end = if last >= i + 3 { max_end(i + 3, last, |e| try_arc(&pts[i..=e], tol).is_some()) } else { i };
+        let use_arc = arc_end >= i + 3 && try_arc(&pts[i..=arc_end], tol).is_some() && arc_end > line_end + 1;
+        if use_arc {
+            out.push((try_arc(&pts[i..=arc_end], tol).unwrap(), pts[i..=arc_end].to_vec()));
+            i = arc_end;
+        } else {
+            out.push((Piece::Line { a: pts[i], b: pts[line_end] }, pts[i..=line_end].to_vec()));
+            i = line_end;
+        }
+    }
+}
+
+/// Dense polyline approximating a piece, for error measurement.
+fn piece_polyline(p: &Piece) -> Vec<V2> {
+    match *p {
+        Piece::Line { a, b } => vec![a, b],
+        Piece::Arc { a, m, b } => match circumcircle(a, m, b) {
+            None => vec![a, b],
+            Some((c, r)) => {
+                let ang = |p: V2| (p[1] - c[1]).atan2(p[0] - c[0]);
+                let (aa, am, ab) = (ang(a), ang(m), ang(b));
+                let norm = |x: f64| x.rem_euclid(std::f64::consts::TAU);
+                // direction a -> b through m
+                let ccw = norm(am - aa) < norm(ab - aa);
+                let sweep = if ccw { norm(ab - aa) } else { -norm(aa - ab) };
+                let steps = ((sweep.abs() / 0.01).ceil() as usize).max(2);
+                (0..=steps).map(|i| { let t = aa + sweep * i as f64 / steps as f64; [c[0] + r * t.cos(), c[1] + r * t.sin()] }).collect()
+            }
+        },
+    }
+}
+
+/// Split a closed ring at its corners and fit each smooth run as lines and three-point arcs.
+/// Returns the pieces (closed, in order) and the worst distance from the ring to them.
+pub fn segment_ring(ring: &[V2], tol: f64) -> (Vec<Piece>, f64) {
+    let n = ring.len();
+    let mut corners: Vec<usize> = Vec::new();
+    for i in 0..n {
+        let (p, a, b) = (ring[i], ring[(i + n - 1) % n], ring[(i + 1) % n]);
+        let (e1, e2) = ([p[0] - a[0], p[1] - a[1]], [b[0] - p[0], b[1] - p[1]]);
+        let (l1, l2) = ((e1[0] * e1[0] + e1[1] * e1[1]).sqrt(), (e2[0] * e2[0] + e2[1] * e2[1]).sqrt());
+        if l1 < 1e-12 || l2 < 1e-12 { continue; }
+        let c = ((e1[0] * e2[0] + e1[1] * e2[1]) / (l1 * l2)).clamp(-1.0, 1.0);
+        if c.acos() > 25f64.to_radians() { corners.push(i); }
+    }
+    let mut parts: Vec<(Piece, Vec<V2>)> = Vec::new();
+    if corners.is_empty() {
+        // smooth ring: one cyclic run from the first point (the merge below joins across the seam)
+        let mut run: Vec<V2> = ring.to_vec();
+        run.push(ring[0]);
+        greedy_run(&run, tol, &mut parts);
+    } else {
+        for w in 0..corners.len() {
+            let (s, e) = (corners[w], corners[(w + 1) % corners.len()]);
+            let len = if e > s { e - s } else { e + n - s };
+            let run: Vec<V2> = (0..=len).map(|k| ring[(s + k) % n]).collect();
+            greedy_run(&run, tol, &mut parts);
+        }
+    }
+    // merge neighbours that are really one line or one arc
+    let mut changed = true;
+    while changed && parts.len() > 2 {
+        changed = false;
+        for i in 0..parts.len() {
+            let j = (i + 1) % parts.len();
+            if i == j { continue; }
+            let same_kind = matches!((&parts[i].0, &parts[j].0), (Piece::Line { .. }, Piece::Line { .. }) | (Piece::Arc { .. }, Piece::Arc { .. }));
+            if !same_kind { continue; }
+            let mut joined = parts[i].1.clone();
+            joined.extend_from_slice(&parts[j].1[1..]);
+            let mut one = Vec::new();
+            fit_run(&joined, tol, 24, &mut one); // depth 24: no further splitting
+            if one.len() == 1 {
+                let ok = match one[0].0 {
+                    Piece::Line { a, b } => joined.iter().all(|&p| point_segment_dist(p, a, b) <= tol),
+                    Piece::Arc { .. } => true,
+                };
+                if ok {
+                    let merged = one.remove(0);
+                    let (lo, hi) = (i.min(j), i.max(j));
+                    if hi == lo + 1 { parts.splice(lo..=hi, [merged]); } else { parts.remove(hi); parts[lo] = merged; }
+                    changed = true;
+                    break;
+                }
+            }
+        }
+    }
+    let pieces: Vec<Piece> = parts.into_iter().map(|p| p.0).collect();
+    let dense: Vec<V2> = pieces.iter().flat_map(piece_polyline).collect();
+    let mut err: f64 = 0.0;
+    for &p in ring {
+        let d = (0..dense.len()).map(|i| point_segment_dist(p, dense[i], dense[(i + 1) % dense.len()])).fold(f64::INFINITY, f64::min);
+        err = err.max(d);
+    }
+    (pieces, err)
+}

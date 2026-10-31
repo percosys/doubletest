@@ -1,9 +1,9 @@
 //! Layers (slabs) along an axis (methods M3, M4, M5-circles).
 
-use crate::fit::{fit_circle, simplify_ring};
+use crate::fit::{circumcircle, fit_circle, segment_ring, simplify_ring, Piece};
 use crate::geom::*;
 use crate::mesh::Mesh;
-use crate::plan::{Loop, Region};
+use crate::plan::{Loop, PathPiece, Region};
 use crate::poly::*;
 use crate::section::section_loops;
 
@@ -31,6 +31,17 @@ pub fn ring_to_loop(ring: &[V2], eps: f64) -> (Loop, f64, f64) {
         }
     }
     let (s, err) = simplify_ring(ring, eps);
+    // lines and arcs, if the outline has arcs and they say it more simply than a polyline
+    let (pieces, perr) = segment_ring(ring, eps);
+    let has_arc = pieces.iter().any(|p| matches!(p, Piece::Arc { .. }));
+    if has_arc && pieces.len() < s.len() && perr <= eps.max(err) {
+        let out: Vec<PathPiece> = pieces.iter().filter_map(|p| match *p {
+            Piece::Line { a, b } => Some(PathPiece::Line { a: [r5(a[0]), r5(a[1])], b: [r5(b[0]), r5(b[1])] }),
+            Piece::Arc { a, m, b } => circumcircle(a, m, b).map(|(c, r)| PathPiece::Arc {
+                a: [r5(a[0]), r5(a[1])], m: [r5(m[0]), r5(m[1])], b: [r5(b[0]), r5(b[1])], cx: r5(c[0]), cy: r5(c[1]), r: r5(r) }),
+        }).collect();
+        return (Loop::Path { pieces: out }, 0.0, perr);
+    }
     (Loop::Polyline { pts: s.iter().map(|p| [r5(p[0]), r5(p[1])]).collect() }, 0.0, err)
 }
 

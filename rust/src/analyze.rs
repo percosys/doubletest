@@ -109,6 +109,23 @@ fn edge_descriptors(t: &Treatment, layer: &LayerOut, thr: f64) -> Vec<serde_json
                     });
                     if ok { out.push(serde_json::json!({"type": "circle", "cx": cx, "cy": cy, "r": r, "z": z})); }
                 }
+                Loop::Path { pieces } => {
+                    for pc in pieces {
+                        match pc {
+                            PathPiece::Line { a, b } => {
+                                let mid = [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
+                                if curve_dist(mid, &t.curves) < thr && curve_dist(*a, &t.curves) < thr {
+                                    out.push(serde_json::json!({"type": "segment", "p0": a, "p1": b, "z": z}));
+                                }
+                            }
+                            PathPiece::Arc { a, m, b, cx, cy, r } => {
+                                if curve_dist(*m, &t.curves) < thr && curve_dist(*a, &t.curves) < thr {
+                                    out.push(serde_json::json!({"type": "arc", "a": a, "b": b, "cx": cx, "cy": cy, "r": r, "z": z}));
+                                }
+                            }
+                        }
+                    }
+                }
                 Loop::Polyline { pts } => {
                     for (i, p0) in pts.iter().enumerate() {
                         let p1 = pts[(i + 1) % pts.len()];
