@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stl2cad"
+version = "0.1.0"
+description = "Deterministic STL -> parametric CAD recipe pipeline with typed JEV judgments"
+requires-python = ">=3.10"
+dependencies = ["numpy", "scipy", "trimesh"]
+
+[project.optional-dependencies]
+cad = ["cadquery"]
+dev = ["pytest", "manifold3d", "shapely", "mapbox-earcut"]
+
+[project.scripts]
+stl2cad = "stl2cad.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
