@@ -93,3 +93,20 @@ def test_hole_countersinks_and_outline_chamfer_are_fitted_separately(tmp_path):
     cs_t = [t for t in plan.treatments if abs(t["size_xy"] - 1.75) < 0.15]
     assert len(cs_t) == 1 and len(cs_t[0]["edges"]) == 2
     assert plan.deviation["max_mm"] + plan.simplify_error_mm <= 0.05
+
+
+def test_surface_from_slabs_matches_union_and_survives_hairline_slabs():
+    from shapely.geometry import box as sbox
+    from stl2cad.verify import deviation, surface_from_slabs, slabs_to_mesh
+
+    # a stepped stack, including a 0.0001 mm hairline slab that broke the boolean union
+    slabs = [(0, 2, sbox(0, 0, 40, 30)), (2, 2.0001, sbox(0, 0, 39, 30)),
+             (2.0001, 5, sbox(5, 5, 25, 25)), (5, 8, sbox(8, 8, 20, 20))]
+    soup, vol = surface_from_slabs(slabs)
+    expected = 40 * 30 * 2 + 39 * 30 * 0.0001 + 20 * 20 * 2.9999 + 12 * 12 * 3
+    assert abs(vol - expected) < 1e-6
+    ref = slabs_to_mesh(slabs)
+    d = deviation(ref, soup, n=3000, rebuilt_volume=vol)
+    assert d.max_mm < 1e-3 and d.volume_diff_pct < 0.01
+    # exterior only: surface area equals the union's (no internal faces)
+    assert abs(soup.area - ref.area) / ref.area < 1e-3

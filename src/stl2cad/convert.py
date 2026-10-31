@@ -20,7 +20,8 @@ from .layers import Frame, Layer, build_layers, candidate_axes, make_frame, merg
 from .treatments import Treatment, detect_treatments, layer_slabs
 from .questions import build_state, hole_questions
 from .segment import segment
-from .verify import deviation, layers_to_mesh, slabs_to_mesh
+from .layers import _union
+from .verify import deviation, surface_from_slabs
 
 PLAN_VERSION = 1
 _T0 = time.time()
@@ -58,11 +59,13 @@ def _layer_dict(L: Layer) -> dict:
                          "centroid": [round(c, 5) for c in r.centroid]} for r in L.regions]}
 
 
-def _treated_mesh(layers: list[Layer], ts: list[Treatment], tol: float):
+def _verify(am, layers: list[Layer], ts: list[Treatment], tol: float):
+    """Deviation of the layered model (with edge treatments, if any) from the mesh."""
     slabs = []
     for k, L in enumerate(layers):
-        slabs += layer_slabs(L, k, ts, step=0.25 * tol)
-    return slabs_to_mesh(slabs)
+        slabs += layer_slabs(L, k, ts, step=0.25 * tol) if ts else [(L.z0, L.z1, _union(L))]
+    mesh, vol = surface_from_slabs(slabs)
+    return deviation(am, mesh, rebuilt_volume=vol)
 
 
 def _edge_descriptors(t: Treatment, plan_layer: dict, eps: float) -> list[dict]:
@@ -95,7 +98,7 @@ def _sharp(raw, axis, tol: float):
     variants = [merged] + ([layers0] if len(merged) != len(layers0) else [])
     best = None
     for layers in variants:
-        dev = deviation(am, layers_to_mesh(layers))
+        dev = _verify(am, layers, [], tol)
         _trace(f"  {len(layers)} layers: max deviation {dev.max_mm:.4f} mm")
         res = {"frame": frame, "layers": layers, "fit_err": fit_err, "eps": eps, "simp": simp_err,
                "dev": dev, "dev_sharp": dev, "treatments": []}
@@ -113,7 +116,7 @@ def _with_treatments(res: dict, tol: float, max_edge: float) -> dict:
     ts = detect_treatments(am, res["layers"], tol, max_edge)
     _trace(f"  {len(ts)} edge treatments detected")
     if ts:
-        dev_t = deviation(am, _treated_mesh(res["layers"], ts, tol))
+        dev_t = _verify(am, res["layers"], ts, tol)
         _trace(f"  with treatments: max deviation {dev_t.max_mm:.4f} mm")
         if dev_t.max_mm < res["dev"].max_mm:
             return {**res, "dev": dev_t, "treatments": ts}

@@ -211,7 +211,13 @@ def layer_slabs(layer: Layer, k: int, treatments: list[Treatment], step: float):
         lo, hi = max(lo, layer.z0), min(hi, layer.z1)
         n = min(max(10, int(np.ceil((hi - lo) / step))), MAX_STEPS)
         cuts.update(lo + (hi - lo) * j / n for j in range(n + 1))
-    zs = sorted(cuts)
+    zs = []
+    for z in sorted(cuts):  # snap near-duplicate cuts (they make hairline slabs)
+        if zs and z - zs[-1] < 5e-4:
+            if abs(z - layer.z1) < 1e-9:
+                zs[-1] = z
+            continue
+        zs.append(z)
     out = []
     for a, b in zip(zs[:-1], zs[1:]):
         if b - a < 1e-9:
